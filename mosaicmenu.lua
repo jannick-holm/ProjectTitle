@@ -27,7 +27,6 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local logger = require("logger")
 local util = require("util")
-local time = require("ui/time")
 local _ = require("l10n.gettext")
 local Screen = Device.screen
 local T = require("ffi/util").template
@@ -39,7 +38,7 @@ local ptdbg = require("ptdbg")
 -- Here is the specific UI implementation for "grid" display modes
 -- (see covermenu.lua for the generic code)
 local is_pathchooser = false
-local sourcedir = ptutil.getSourceDir()
+local plugin_dir = ptutil.getPluginDir()
 local alpha_level = 0.84
 local tag_width = 0.35
 local margin_size = 10
@@ -79,15 +78,17 @@ local FakeCover = FrameContainer:extend {
     book_lang = nil,
     -- these font sizes will be scaleBySize'd by Font:getFace()
     authors_font_max = 20,
-    authors_font_min = 6,
-    title_font_max = 24,
-    title_font_min = 10,
-    filename_font_max = 10,
-    filename_font_min = 8,
-    top_pad = Size.padding.default,
-    bottom_pad = Size.padding.default,
-    sizedec_step = Screen:scaleBySize(2), -- speeds up a bit if we don't do all font sizes
+    authors_font_min = 14,
+    series_font_max = 20,
+    series_font_min = 14,
+    title_font_max = 28,
+    title_font_min = 16,
+    top_pad = 0,
+    bottom_pad = 0,
+    sizedec_step = 2,
     initial_sizedec = 0,
+    color = Blitbuffer.COLOR_GRAY_3,
+    background = Blitbuffer.COLOR_GRAY_E,
 }
 
 function FakeCover:init()
@@ -96,202 +97,287 @@ function FakeCover:init()
     local authors = self.authors
     local title = self.title
     local filename = self.filename
-    -- (some engines may have already given filename (without extension) as title)
-    local bd_wrap_title_as_filename = false
-    local titlefont = ptutil.title_serif
-    if not title then -- use filename as title (big and centered)
-        title = filename
-        filename = nil
-        titlefont = ptutil.good_serif
-        if not self.title_add and self.filename_add then
-            -- filename_add ("…" or "(deleted)") always comes without any title_add
-            self.title_add = self.filename_add
-            self.filename_add = nil
-        end
-        bd_wrap_title_as_filename = true
-    end
-    if filename then
-        filename = BD.filename(filename)
-    end
-    -- If no authors, and title is filename without extension, it was
-    -- probably made by an engine, and we can consider it a filename, and
-    -- act according to common usage in naming files.
-    if not authors and title and self.filename and self.filename:sub(1, title:len()) == title then
-        bd_wrap_title_as_filename = true
-        titlefont = ptutil.good_serif
-        -- Replace a hyphen surrounded by spaces (which most probably was
-        -- used to separate Authors/Title/Serie/Year/Categorie in the
-        -- filename with a \n
-        title = title:gsub(" %- ", "\n")
-        -- Same with |
-        title = title:gsub("|", "\n")
-        -- Also replace underscores with spaces
-        title = title:gsub("_", " ")
-        -- Some filenames may also use dots as separators, but dots
-        -- can also have some meaning, so we can't just remove them.
-        -- But at least, make dots breakable (they wouldn't be if not
-        -- followed by a space), by adding to them a zero-width-space,
-        -- so the dots stay on the right of their preceeding word.
-        title = title:gsub("%.", ".\u{200B}")
-        -- Except for a last dot near end of title that might preceed
-        -- a file extension: we'd rather want the dot and its suffix
-        -- together on a last line: so, move the zero-width-space
-        -- before it.
-        title = title:gsub("%.\u{200B}(%w%w?%w?%w?%w?)$", "\u{200B}.%1")
-        -- These substitutions will hopefully have no impact with the following BD wrapping
-    end
-    if title then
-        title = bd_wrap_title_as_filename and BD.filename(title) or BD.auto(title)
-    end
-    -- If multiple authors (crengine separates them with \n), we
-    -- can display them on multiple lines, but limit to 3, and
-    -- append "et al." on a 4th line if there are more
-    if authors and authors:find("\n") then
-        authors = util.splitToArray(authors, "\n")
-        for i = 1, #authors do
-            authors[i] = BD.auto(authors[i])
-        end
-        if #authors > 3 then
-            authors = { authors[1], authors[2], T(_("%1 et al."), authors[3]) }
-        end
-        authors = table.concat(authors, "\n")
-    elseif authors then
-        authors = BD.auto(authors)
-    end
-    -- Add any _add, which must be already BD wrapped if needed
-    if self.filename_add then
-        filename = (filename and filename or "") .. self.filename_add
-    end
-    if self.title_add then
-        title = (title and title or "") .. self.title_add
-    end
-    if self.authors_add then
-        authors = (authors and authors or "") .. self.authors_add
-    end
+    local series = nil
+    local filesize = nil
+    local inter_pad_1
+    local inter_pad_2
+    local authors_wg, series_wg, filesize_wg, title_wg, filename_wg
+    local titlefont
+    local width, height
+    local title_text_color
+    local title_background_color
 
-    -- We build the VerticalGroup widget with decreasing font sizes till
-    -- the widget fits into available height
-    local width = self.width - 2 * (self.bordersize + self.margin + self.padding)
-    local height = self.height - 2 * (self.bordersize + self.margin + self.padding)
-    local text_width = 7 / 8 * width -- make width of text smaller to have some padding
-    local inter_pad
-    local sizedec = self.initial_sizedec
-    local authors_wg, title_wg, filename_wg
-    local loop2 = false -- we may do a second pass with modifier title and authors strings
-    while true do
-        -- Free previously made widgets to avoid memory leaks
-        if authors_wg then
-            authors_wg:free(true)
-            authors_wg = nil
+    if is_pathchooser == false then
+        width = self.width - 2 * (self.bordersize + self.margin + self.padding)
+        height = self.height - 2 * (self.bordersize + self.margin + self.padding)
+        local text_width = width - (Size.padding.small * 2)
+        -- BookInfoManager:extractBookInfo() made sure
+        -- to save as nil (NULL) metadata that were an empty string
+
+        -- (some engines may have already given filename (without extension) as title)
+        local bd_wrap_title_as_filename = false
+        titlefont = ptutil.title_serif
+        title_text_color = Blitbuffer.COLOR_WHITE
+        title_background_color = Blitbuffer.COLOR_GRAY_3
+        local bold_title = false
+        if not title then -- use filename as title (big and centered)
+            titlefont = ptutil.good_serif
+            bold_title = true
+            title = filename
+            title_text_color = Blitbuffer.COLOR_BLACK
+            title_background_color = self.background
+            if not self.title_add and self.filename_add then
+                -- filename_add ("…" or "(deleted)") always comes without any title_add
+                self.title_add = self.filename_add
+                self.filename_add = nil
+            end
+            bd_wrap_title_as_filename = true
         end
-        if title_wg then
-            title_wg:free(true)
-            title_wg = nil
-        end
-        if filename_wg then
-            filename_wg:free(true)
-            filename_wg = nil
-        end
-        -- Build new widgets
-        local texts_height = 0
-        if authors then
-            authors_wg = TextBoxWidget:new {
-                text = authors,
-                lang = self.book_lang,
-                face = Font:getFace(ptutil.good_serif, math.max(self.authors_font_max - sizedec, self.authors_font_min)),
-                width = text_width,
-                alignment = "center",
-            }
-            texts_height = texts_height + authors_wg:getSize().h
+
+        -- If no authors, and title is filename without extension, it was
+        -- probably made by an engine, and we can consider it a filename, and
+        -- act according to common usage in naming files.
+        if not authors and title and self.filename and self.filename:sub(1, title:len()) == title then
+            bd_wrap_title_as_filename = true
+            titlefont = ptutil.good_serif
+            bold_title = true
+            title_text_color = Blitbuffer.COLOR_BLACK
+            title_background_color = self.background
+            -- Replace a hyphen surrounded by spaces (which most probably was
+            -- used to separate Authors/Title/Serie/Year/Categorie in the
+            -- filename with a \n
+            title = title:gsub(" %- ", "\n")
+            -- Same with |
+            title = title:gsub("|", "\n")
+            -- Also replace underscores with spaces
+            title = title:gsub("_", " ")
+            -- Some filenames may also use dots as separators, but dots
+            -- can also have some meaning, so we can't just remove them.
+            -- But at least, make dots breakable (they wouldn't be if not
+            -- followed by a space), by adding to them a zero-width-space,
+            -- so the dots stay on the right of their preceeding word.
+            title = title:gsub("%.", ".\u{200B}")
+            -- Except for a last dot near end of title that might preceed
+            -- a file extension: we'd rather want the dot and its suffix
+            -- together on a last line: so, move the zero-width-space
+            -- before it.
+            title = title:gsub("%.\u{200B}(%w%w?%w?%w?%w?)$", "\u{200B}.%1")
+            -- These substitutions will hopefully have no impact with the following BD wrapping
         end
         if title then
-            title_wg = TextBoxWidget:new {
-                text = title,
-                lang = self.book_lang,
-                face = Font:getFace(titlefont, math.max(self.title_font_max - sizedec, self.title_font_min)),
-                width = text_width,
-                alignment = "center",
-            }
-            texts_height = texts_height + title_wg:getSize().h
-        end
-        if filename then
-            filename_wg = TextBoxWidget:new {
-                text = filename,
-                lang = self.book_lang, -- might as well use it for filename
-                face = Font:getFace(ptutil.good_sans, math.max(self.filename_font_max - sizedec, self.filename_font_min)),
-                width = self.bottom_right_compensate and width - 2 * corner_mark_size or text_width,
-                alignment = "center",
-            }
-            texts_height = texts_height + filename_wg:getSize().h
-        end
-        local free_height = height - texts_height
-        if authors then
-            free_height = free_height - self.top_pad
-        end
-        if filename then
-            free_height = free_height - self.bottom_pad
-        end
-        inter_pad = math.floor(free_height / 2)
-
-        local textboxes_ok = true
-        if (authors_wg and authors_wg.has_split_inside_word) or (title_wg and title_wg.has_split_inside_word) then
-            -- We may get a nicer cover at next lower font size
-            textboxes_ok = false
+            title = bd_wrap_title_as_filename and BD.filename(title) or BD.auto(title)
         end
 
-        if textboxes_ok and free_height > 0.2 * height then -- enough free space to not look constrained
-            break
-        end
-        -- (We may store the first widgets matching free space requirements but
-        -- not textboxes_ok, so that if we never ever get textboxes_ok candidate,
-        -- we can use them instead of the super-small strings-modified we'll have
-        -- at the end that are worse than the firsts)
+        authors = ptutil.formatAuthors(self.authors, 3)
 
-        sizedec = sizedec + self.sizedec_step
-        if sizedec > 20 then -- break out of loop when too small
-            -- but try a 2nd loop with some cleanup to strings (for filenames
-            -- with no space but hyphen or underscore instead)
-            if not loop2 then
-                loop2 = true
-                sizedec = self.initial_sizedec -- restart from initial big size
-                if G_reader_settings:nilOrTrue("use_xtext") then
-                    -- With Unicode/libunibreak, a break after a hyphen is allowed,
-                    -- but not around underscores and dots without any space around.
-                    -- So, append a zero-width-space to allow text wrap after them.
-                    if title then
-                        title = title:gsub("_", "_\u{200B}"):gsub("%.", ".\u{200B}")
-                    end
-                    if authors then
-                        authors = authors:gsub("_", "_\u{200B}"):gsub("%.", ".\u{200B}")
-                    end
-                else
-                    -- Replace underscores and hyphens with spaces, to allow text wrap there.
-                    if title then
-                        title = title:gsub("-", " "):gsub("_", " ")
-                    end
-                    if authors then
-                        authors = authors:gsub("-", " "):gsub("_", " ")
-                    end
-                end
-            else -- 2nd loop done, no luck, give up
+        if self.title_add then
+            title = (title and title or "") .. self.title_add
+        end
+        if self.authors_add then
+            series = self.authors_add
+        end
+
+        -- We build the VerticalGroup widget with decreasing font sizes till
+        -- the widget fits into available height
+        local sizedec = self.initial_sizedec
+        local loop2 = false -- we may do a second pass with modifier title and authors strings
+        local texts_height
+        local free_height
+        local textboxes_ok
+
+        while true do
+            -- Free previously made widgets to avoid memory leaks
+            if authors_wg then
+                authors_wg:free(true)
+                authors_wg = nil
+            end
+            if series_wg then
+                series_wg:free(true)
+                series_wg = nil
+            end
+            if title_wg then
+                title_wg:free(true)
+                title_wg = nil
+            end
+            if filename_wg then
+                filename_wg:free(true)
+                filename_wg = nil
+            end
+            -- Build new widgets
+            texts_height = 0
+            free_height = 0
+            if authors then
+                authors_wg = TextBoxWidget:new {
+                    text = authors,
+                    lang = self.book_lang,
+                    face = Font:getFace(ptutil.good_serif, math.max(self.authors_font_max - sizedec, self.authors_font_min)),
+                    width = text_width,
+                    alignment = "center",
+                    bgcolor = self.background,
+                }
+                texts_height = texts_height + authors_wg:getSize().h
+            end
+            if series then
+                series_wg = TextBoxWidget:new {
+                    text = series,
+                    lang = self.book_lang,
+                    face = Font:getFace(ptutil.good_serif, math.max(self.series_font_max - sizedec, self.series_font_min)),
+                    width = text_width,
+                    alignment = "center",
+                    bgcolor = self.background,
+                }
+                texts_height = texts_height + series_wg:getSize().h
+            end
+            if title then
+                title_wg = TextBoxWidget:new {
+                    text = title,
+                    lang = self.book_lang,
+                    face = Font:getFace(titlefont, math.max(self.title_font_max - sizedec, self.title_font_min)),
+                    bold = bold_title,
+                    width = text_width,
+                    alignment = "center",
+                    fgcolor = title_text_color,
+                    bgcolor = title_background_color,
+                }
+                texts_height = texts_height + title_wg:getSize().h
+            end
+
+            free_height = height - texts_height
+            if series then
+                inter_pad_1 = math.floor(free_height * 0.5)
+            else
+                inter_pad_1 = math.floor(free_height * 0.2)
+            end
+            inter_pad_2 = free_height - inter_pad_1
+
+            textboxes_ok = true
+            if (authors_wg and authors_wg.has_split_inside_word) or
+                (title_wg and title_wg.has_split_inside_word)  or
+                (series_wg and series_wg.has_split_inside_word) then
+                -- We may get a nicer cover at next lower font size
+                textboxes_ok = false
+            end
+
+            if textboxes_ok and free_height > 0.2 * height then -- enough free space to not look constrained
                 break
             end
+            -- (We may store the first widgets matching free space requirements but
+            -- not textboxes_ok, so that if we never ever get textboxes_ok candidate,
+            -- we can use them instead of the super-small strings-modified we'll have
+            -- at the end that are worse than the firsts)
+
+            sizedec = sizedec + self.sizedec_step
+            if sizedec > 16 then -- break out of loop when too small
+                -- but try a 2nd loop with some cleanup to strings (for filenames
+                -- with no space but hyphen or underscore instead)
+                if not loop2 then
+                    loop2 = true
+                    sizedec = self.initial_sizedec -- restart from initial big size
+                    if G_reader_settings:nilOrTrue("use_xtext") then
+                        -- With Unicode/libunibreak, a break after a hyphen is allowed,
+                        -- but not around underscores and dots without any space around.
+                        -- So, append a zero-width-space to allow text wrap after them.
+                        if title then
+                            title = title:gsub("_", "_\u{200B}"):gsub("%.", ".\u{200B}")
+                        end
+                        if authors then
+                            authors = authors:gsub("_", "_\u{200B}"):gsub("%.", ".\u{200B}")
+                        end
+                        if series then
+                            series = series:gsub("_", "_\u{200B}"):gsub("%.", ".\u{200B}")
+                        end
+                    else
+                        -- Replace underscores and hyphens with spaces, to allow text wrap there.
+                        if title then
+                            title = title:gsub("-", " "):gsub("_", " ")
+                        end
+                        if authors then
+                            authors = authors:gsub("-", " "):gsub("_", " ")
+                        end
+                        if series then
+                            series = series:gsub("-", " "):gsub("_", " ")
+                        end
+                    end
+                else -- 2nd loop done, no luck, give up
+                    break
+                end
+            end
         end
+    else -- pathchooser gets a plain style
+        title = BD.filename(self.filename)
+        filesize = self.filename_add
+        local textboxes_ok
+        local free_height
+        local sizedec = 1
+        self.background = Blitbuffer.COLOR_WHITE
+        self.radius = Screen:scaleBySize(10)
+        self.bordersize = Size.border.default
+        self.padding = Screen:scaleBySize(5)
+        width = self.width - 2 * (self.bordersize + self.margin + self.padding)
+        height = self.height - 2 * (self.bordersize + self.margin + self.padding)
+        local text_width = width - (Size.padding.small * 2)
+        while true do
+            if title_wg then
+                title_wg:free(true)
+                title_wg = nil
+            end
+            title_wg = TextBoxWidget:new {
+                text = title,
+                face = Font:getFace("cfont", math.max(20 - sizedec, 10)),
+                bold = false,
+                width = text_width,
+                alignment = "center",
+                fgcolor = Blitbuffer.COLOR_BLACK,
+                bgcolor = Blitbuffer.COLOR_WHITE,
+            }
+            free_height = height - title_wg:getSize().h
+            textboxes_ok = true
+            if (title_wg and title_wg.has_split_inside_word) then
+                -- We may get a nicer cover at next lower font size
+                textboxes_ok = false
+            end
+            if textboxes_ok and free_height > 0.2 * height then -- enough free space to not look constrained
+                break
+            end
+            sizedec = sizedec + 1
+            if sizedec > 10 then break end
+        end
+        filesize_wg = TextBoxWidget:new {
+            text = filesize,
+            face = Font:getFace("infont", 15),
+            bold = false,
+            width = text_width,
+            alignment = "center",
+            fgcolor = Blitbuffer.COLOR_BLACK,
+            bgcolor = Blitbuffer.COLOR_WHITE,
+        }
+        free_height = free_height - filesize_wg:getSize().h
+        inter_pad_1 = Screen:scaleBySize(7)
+        inter_pad_2 = free_height - inter_pad_1
     end
 
     local vgroup = VerticalGroup:new {}
+    table.insert(vgroup, VerticalSpan:new { width = inter_pad_1 })
     if authors then
-        table.insert(vgroup, VerticalSpan:new { width = self.top_pad })
         table.insert(vgroup, authors_wg)
     end
-    table.insert(vgroup, VerticalSpan:new { width = inter_pad })
     if title then
-        table.insert(vgroup, title_wg)
+        table.insert(vgroup, FrameContainer:new {
+            margin = 0,
+            padding = 0,
+            padding_left = Size.padding.small,
+            padding_right = Size.padding.small,
+            bordersize = 0,
+            background = title_background_color,
+            title_wg
+        })
     end
-    table.insert(vgroup, VerticalSpan:new { width = inter_pad })
-    if filename then
-        table.insert(vgroup, filename_wg)
-        table.insert(vgroup, VerticalSpan:new { width = self.bottom_pad })
+    if series then
+        table.insert(vgroup, series_wg)
+    end
+    table.insert(vgroup, VerticalSpan:new { width = inter_pad_2 })
+    if filesize then
+        table.insert(vgroup, filesize_wg)
     end
 
     if self.file_deleted then
@@ -423,7 +509,7 @@ function MosaicMenuItem:update()
             end
             -- use stock folder icon
             if subfolder_cover_image == nil then
-                local stock_image = sourcedir .. "/resources/folder.svg"
+                local stock_image = plugin_dir .. "/resources/folder.svg"
                 local _, _, scale_factor = BookInfoManager.getCachedCoverSize(250, 500, max_img_w * 1.1, max_img_h * 1.1)
                 subfolder_cover_image = FrameContainer:new {
                     width = dimen.w,
@@ -445,14 +531,30 @@ function MosaicMenuItem:update()
             end
 
             -- build final widget with whatever we assembled from above
-            local dir_font_size = 22
-            local directory_text = TextWidget:new {
-                text = " " .. directory_string .. " ",
-                face = Font:getFace(ptutil.good_serif, dir_font_size),
-                max_width = dimen.w,
-                alignment = "center",
-                padding = 0,
-            }
+            local directory_text
+            local function build_directory_text(font_size, height, baseline)
+                directory_text = TextWidget:new {
+                    text = " " .. directory_string .. " ",
+                    face = Font:getFace(ptutil.good_serif, font_size),
+                    max_width = dimen.w,
+                    alignment = "center",
+                    padding = 0,
+                    forced_height = height,
+                    forced_baseline = baseline,
+                }
+            end
+            local dirtext_font_size = ptutil.grid_defaults.dir_font_nominal
+            build_directory_text(dirtext_font_size)
+            local directory_text_height = directory_text:getSize().h
+            local directory_text_baseline = directory_text:getBaseline()
+            while dirtext_font_size > ptutil.grid_defaults.dir_font_min do
+                if directory_text:isTruncated() then
+                    dirtext_font_size = math.min(dirtext_font_size - ptutil.grid_defaults.fontsize_dec_step, ptutil.grid_defaults.dir_font_min)
+                    build_directory_text(dirtext_font_size, directory_text_height, directory_text_baseline)
+                else
+                    break
+                end
+            end
             local directory_frame = UnderlineContainer:new {
                 linesize = Screen:scaleBySize(1),
                 color = Blitbuffer.COLOR_BLACK,
@@ -595,12 +697,12 @@ function MosaicMenuItem:update()
                 radius = Screen:scaleBySize(10),
                 OverlapGroup:new {
                     dimen = dimen_in,
-                    CenterContainer:new { dimen = dimen_in, directory },
+                    TopContainer:new { dimen = dimen_in, directory },
                     BottomContainer:new { dimen = dimen_in, nbitems },
                 },
             }
         end
-    else                                   -- file
+    else  -- file
         self.file_deleted = self.entry.dim -- entry with deleted file from History or selected file from FM
 
         if self.do_hint_opened and DocSettings:hasSidecarFile(self.filepath) then
@@ -653,6 +755,10 @@ function MosaicMenuItem:update()
             if self.do_cover_image and bookinfo.has_cover and not bookinfo.ignore_cover then
                 cover_bb_used = true
                 -- Let ImageWidget do the scaling and give us a bb that fit
+                local frame_radius = 0
+                if self.show_progress_bar then
+                    frame_radius = Size.radius.default
+                end
                 local border_total = Size.border.thin * 2
                 local _, _, scale_factor = BookInfoManager.getCachedCoverSize(bookinfo.cover_w, bookinfo.cover_h,
                     max_img_w - border_total, max_img_h - border_total)
@@ -660,24 +766,17 @@ function MosaicMenuItem:update()
                     image = bookinfo.cover_bb,
                     scale_factor = scale_factor,
                 }
-                image:_render()
-                local image_size = image:getSize()
-                local frame_radius = 0
-                local frame_color = Blitbuffer.COLOR_GRAY_3
-                if self.show_progress_bar then
-                    frame_radius = Size.radius.default
-                end
                 widget = CenterContainer:new {
                     dimen = dimen,
                     FrameContainer:new {
-                        width = image_size.w + border_total,
-                        height = image_size.h + border_total,
+                        width = math.floor((bookinfo.cover_w * scale_factor) + border_total),
+                        height = math.floor((bookinfo.cover_h * scale_factor) + border_total),
                         margin = 0,
                         padding = 0,
                         radius = frame_radius,
                         bordersize = Size.border.thin,
                         dim = self.file_deleted,
-                        color = frame_color,
+                        color = Blitbuffer.COLOR_GRAY_3,
                         image,
                     }
                 }
@@ -686,23 +785,10 @@ function MosaicMenuItem:update()
                 self._has_cover_image = true
             else
                 -- add Series metadata if requested
-                local series_mode = BookInfoManager:getSetting("series_mode")
                 local title_add, authors_add
-                if bookinfo.series then
-                    if bookinfo.series_index then
-                        bookinfo.series = BD.auto(bookinfo.series .. " #" .. bookinfo.series_index)
-                    else
-                        bookinfo.series = BD.auto(bookinfo.series)
-                    end
-                    if not bookinfo.authors then
-                        if series_mode == "series_in_separate_line" then
-                            authors_add = bookinfo.series
-                        end
-                    else
-                        if series_mode == "series_in_separate_line" then
-                            authors_add = "\n \n" .. bookinfo.series
-                        end
-                    end
+                if bookinfo.series and bookinfo.series_index and bookinfo.series_index ~= 0 then -- suppress series if index is "0"
+                    authors_add = BD.auto(bookinfo.series)
+                    bookinfo.series = "#" .. bookinfo.series_index .. ptutil.separator.en_dash .. BD.auto(bookinfo.series)
                 end
                 local bottom_pad = Size.padding.default
                 if self.show_progress_bar and self.do_hint_opened then
@@ -714,7 +800,7 @@ function MosaicMenuItem:update()
                     dimen = dimen,
                     FakeCover:new {
                         -- reduced width to make it look less squared, more like a book
-                        width = math.floor(dimen.w * 7 / 8),
+                        width = math.floor(dimen.w * 0.8),
                         height = dimen.h,
                         bordersize = border_size,
                         filename = self.text,
@@ -805,6 +891,10 @@ function MosaicMenuItem:paintTo(bb, x, y)
     -- Original painting
     InputContainer.paintTo(self, bb, x, y)
 
+    -- No further painting is required over directories
+    self.is_directory = not (self.entry.is_file or self.entry.file)
+    if self.is_directory then return end
+
     -- other paintings are anchored to the sub-widget (cover image)
     local target = self[1][1][1]
 
@@ -823,8 +913,6 @@ function MosaicMenuItem:paintTo(bb, x, y)
             corner_mark:paintTo(bb, ix, iy)
         end
     end
-
-    self.is_directory = not (self.entry.is_file or self.entry.file)
 
     local bookinfo = BookInfoManager:getBookInfo(self.filepath, false)
     if bookinfo and self.init_done then
@@ -863,15 +951,15 @@ function MosaicMenuItem:paintTo(bb, x, y)
             series_widget:paintTo(bb, pos_x, pos_y)
         end
 
-        if self.show_progress_bar and is_pathchooser == false and not self.is_directory then
+        if self.show_progress_bar and is_pathchooser == false then
             local progress_widget_width_mult = 1.0
             local est_page_count = self.pages or nil
             local large_book = false
             if est_page_count then
                 local fn_pages = tonumber(est_page_count)
-                local max_progress_size = 235
-                local pixels_per_page = 3
-                local min_progress_size = 40
+                local max_progress_size = ptutil.grid_defaults.progress_bar_max_size
+                local pixels_per_page = ptutil.grid_defaults.progress_bar_pixels_per_page
+                local min_progress_size = ptutil.grid_defaults.progress_bar_min_size
                 local total_pixels = math.max(
                 (math.min(math.floor((fn_pages / pixels_per_page) + 0.5), max_progress_size)), min_progress_size)
                 progress_widget_width_mult = total_pixels / max_progress_size
@@ -896,7 +984,7 @@ function MosaicMenuItem:paintTo(bb, x, y)
                     margin = 0,
                     background = Blitbuffer.COLOR_WHITE,
                     ImageWidget:new {
-                        file = sourcedir .. "/resources/trophy.svg",
+                        file = plugin_dir .. "/resources/trophy.svg",
                         alpha = true,
                         width = status_icon_size - (Size.border.thin * 2) - Size.padding.small,
                         height = status_icon_size - (Size.border.thin * 2) - Size.padding.small,
@@ -912,7 +1000,7 @@ function MosaicMenuItem:paintTo(bb, x, y)
                     margin = 0,
                     background = Blitbuffer.COLOR_WHITE,
                     ImageWidget:new {
-                        file = sourcedir .. "/resources/pause.svg",
+                        file = plugin_dir .. "/resources/pause.svg",
                         alpha = true,
                         width = status_icon_size - (Size.border.thin * 2) - Size.padding.small,
                         height = status_icon_size - (Size.border.thin * 2) - Size.padding.small,
@@ -922,7 +1010,7 @@ function MosaicMenuItem:paintTo(bb, x, y)
                 }
             elseif not bookinfo._no_provider and percent_done == 0 then
                 local unopened_widget = ImageWidget:new {
-                    file = sourcedir .. "/resources/new.svg",
+                    file = plugin_dir .. "/resources/new.svg",
                     alpha = true,
                     width = Screen:scaleBySize(8),
                     height = Screen:scaleBySize(8),
@@ -945,7 +1033,7 @@ function MosaicMenuItem:paintTo(bb, x, y)
             if large_book then
                 local large_book_icon_size = Screen:scaleBySize(19)
                 local max_widget = ImageWidget:new({
-                    file = sourcedir .. "/resources/large_book.svg",
+                    file = plugin_dir .. "/resources/large_book.svg",
                     width = large_book_icon_size,
                     height = large_book_icon_size,
                     scale_factor = 0,
@@ -957,7 +1045,7 @@ function MosaicMenuItem:paintTo(bb, x, y)
                     (pos_y - progress_widget:getSize().h / 3)
                 )
             end
-        elseif not self.is_directory and is_pathchooser == false then
+        elseif is_pathchooser == false then
             local progresstxt = nil
             if not BookInfoManager:getSetting("hide_file_info") then
                 progresstxt = (" " .. self.mandatory .. " ") or " ??? "
@@ -1069,9 +1157,11 @@ function MosaicMenu:_recalculateDimen()
     end
 
     self.item_margin = Screen:scaleBySize(margin_size)
-    self.others_height = self.others_height + (Size.line.thin * self.nb_rows) -- lines between items
-    self.others_height = self.others_height + (self.nb_rows * self.item_margin) -- margins between rows
-    self.others_height = self.others_height + Screen:scaleBySize(3) -- bottom padding
+    -- in meta mode, an extra line and margins are drawn between bottom row and footer to indicate read status
+    local additional_padding = 0
+    if self.meta_show_opened ~= nil then additional_padding = 1 end
+    self.others_height = self.others_height + ((self.nb_rows + additional_padding) * Size.line.thin) -- lines between rows
+    self.others_height = self.others_height + ((self.nb_rows + additional_padding) * self.item_margin) -- margins between rows
 
     -- Set our items target size
     self.item_height = math.floor(
@@ -1105,7 +1195,7 @@ function MosaicMenu:_recalculateDimen()
         margin = 0,
         background = Blitbuffer.COLOR_WHITE,
         ImageWidget:new {
-            file = sourcedir .. "/resources/trophy.svg",
+            file = plugin_dir .. "/resources/trophy.svg",
             alpha = true,
             width = corner_mark_size,
             height = corner_mark_size,
@@ -1140,7 +1230,7 @@ function MosaicMenu:_recalculateDimen()
         margin = 0,
         background = Blitbuffer.COLOR_WHITE,
         ImageWidget:new {
-            file = sourcedir .. "/resources/pause.svg",
+            file = plugin_dir .. "/resources/pause.svg",
             alpha = true,
             width = corner_mark_size,
             height = corner_mark_size,
@@ -1188,12 +1278,16 @@ function MosaicMenu:_updateItemsBuildUI()
     -- Build our grid
     local grid_timer = ptdbg:new()
     local line_width = self.width or self.screen_w
-    table.insert(self.item_group, ptutil.darkLine(line_width))
+    local half_margin_size = margin_size / 2
+    table.insert(self.item_group, ptutil.mediumBlackLine(line_width))
+    table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
     local cur_row = nil
     local idx_offset = (self.page - 1) * self.perpage
+    local items_on_current_page = math.min(self.perpage, math.max(0, #self.item_table - idx_offset))
+    local last_index  = idx_offset + items_on_current_page
     local line_layout = {}
     local select_number
-    local half_margin_size = margin_size / 2
+    if self.recent_boundary_index == nil then self.recent_boundary_index = 0 end
     for idx = 1, self.perpage do
         local itm_timer = ptdbg:new()
         local index = idx_offset + idx
@@ -1204,12 +1298,7 @@ function MosaicMenu:_updateItemsBuildUI()
             select_number = idx
         end
         if idx % self.nb_cols == 1 then -- new row
-            table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
-            if idx > 1 then
-                table.insert(self.layout, line_layout)
-                table.insert(self.item_group, ptutil.lightLine(line_width))
-                table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
-            end
+            if idx > 1 then table.insert(self.layout, line_layout) end
             line_layout = {}
             cur_row = HorizontalGroup:new {}
             -- Have items on the possibly non-fully filled last row aligned to the left
@@ -1238,17 +1327,58 @@ function MosaicMenu:_updateItemsBuildUI()
         table.insert(cur_row, item_tmp)
         table.insert(cur_row, HorizontalSpan:new({ width = self.item_margin }))
 
+        -- Recent items that are sorted to top of the library are underlined in black (using the row separator line)
+        -- If the current row ends before the boundary → full black line. If boundary falls within the current
+        -- row → gray baseline + black overlay over recent columns, otherwise → thin gray.
+        -- Special case: last line gets a white (invisible) line instead of gray. Logic for black lines is unchanged.
+        if idx % self.nb_cols == 1 then -- new row
+            local row_start = index
+            local row_end   = math.min(index + (self.nb_cols - 1), last_index)
+            local is_last_row = (row_end == last_index)
+            local draw_line = ((not is_last_row) or (is_last_row and self.meta_show_opened ~= nil))
+            if draw_line then
+                table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
+            end
+            local baseline = is_last_row and ptutil.thinWhiteLine or ptutil.thinGrayLine
+            if self.recent_boundary_index > 0 then
+                if row_end <= self.recent_boundary_index then
+                    table.insert(self.item_group, ptutil.thinBlackLine(line_width))
+                elseif row_start <= self.recent_boundary_index and row_end >= self.recent_boundary_index then
+                    local pad = Screen:scaleBySize(10)
+                    local inner_total = math.max(0, line_width - 2 * pad)
+                    local dark_cols = math.max(0, math.min(self.nb_cols, self.recent_boundary_index - row_start + 1))
+                    local dark_inner = math.floor(inner_total * (dark_cols / self.nb_cols))
+
+                    table.insert(self.item_group, OverlapGroup:new {
+                        dimen = Geom:new { w = line_width, h = Size.line.thin },
+                        baseline(line_width),
+                        LeftContainer:new {
+                            dimen = Geom:new { w = (2 * pad) + dark_inner, h = Size.line.thin },
+                            ptutil.thinBlackLine((2 * pad) + dark_inner),
+                        },
+                    })
+                else
+                    if draw_line then table.insert(self.item_group, baseline(line_width)) end
+                end
+            else
+                if draw_line then table.insert(self.item_group, baseline(line_width)) end
+            end
+            if draw_line then
+                table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
+            end
+        end
         -- this is for focus manager
         table.insert(line_layout, item_tmp)
-
         if not item_tmp.bookinfo_found and not item_tmp.is_directory and not item_tmp.file_deleted then
             -- Register this item for update
             table.insert(self.items_to_update, item_tmp)
         end
         itm_timer:report("Draw grid item " .. getMenuText(entry))
     end
+    if self.meta_show_opened == nil then
+        table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(half_margin_size) })
+    end
     table.insert(self.layout, line_layout)
-    table.insert(self.item_group, VerticalSpan:new { width = Screen:scaleBySize(3) }) -- bottom padding
     grid_timer:report("Draw cover grid page " .. self.perpage)
     return select_number
 end

@@ -268,8 +268,13 @@ function CoverMenu:onCloseWidget()
 end
 
 function CoverMenu:genItemTable(dirs, files, path)
+    is_pathchooser = ptutil.isPathChooser(self)
+    self.recent_boundary_index = 0
+    self.meta_show_opened = nil
+
     if meta_browse_mode == true and is_pathchooser == false and G_reader_settings:readSetting("home_dir") ~= nil then
         -- build item tables from coverbrowser-style sqlite db
+        if BookInfoManager:getSetting("opened_at_top_of_library") then self.meta_show_opened = true end
         local SQ3 = require("lua-ljsqlite3/init")
         local DataStorage = require("datastorage")
         local lfs = require("libs/libkoreader-lfs")
@@ -285,16 +290,22 @@ function CoverMenu:genItemTable(dirs, files, path)
         if res then
             local directories = res[1]
             local filenames = res[2]
+            local dirpath
+            local fullpath
+            local place_at_top
+            local attributes
+            local item
+            local book_info
+            local collate = { can_collate_mixed = nil, item_func = nil }
             for i, filename in ipairs(filenames) do
-                local dirpath = directories[i]
-                local fullpath = dirpath .. filename
-                local place_at_top = false
+                dirpath = directories[i]
+                fullpath = dirpath .. filename
+                place_at_top = false
                 if util.fileExists(fullpath) and not (G_reader_settings:isFalse("show_hidden") and util.stringStartsWith(filename, ".")) then
-                    local collate = { can_collate_mixed = nil, item_func = nil }
-                    local attributes = lfs.attributes(fullpath) or {}
-                    local item = FileChooser:getListItem(dirpath, filename, fullpath, attributes, collate)
+                    attributes = lfs.attributes(fullpath) or {}
+                    item = FileChooser:getListItem(dirpath, filename, fullpath, attributes, collate)
                     if BookInfoManager:getSetting("opened_at_top_of_library") then
-                        local book_info = BookList.getBookInfo(fullpath)
+                        book_info = BookList.getBookInfo(fullpath)
                         if book_info.status == "reading" and (book_info.percent_finished ~= nil and book_info.percent_finished < 100) then
                             place_at_top = true
                         end
@@ -307,7 +318,14 @@ function CoverMenu:genItemTable(dirs, files, path)
                 end
             end
             if util.tableSize(items_place_at_top) > 0 then
-                util.tableMerge(custom_item_table, items_place_at_top)
+                self.recent_boundary_index = util.tableSize(items_place_at_top)
+                local function join_tables(t1,t2)
+                    for i=1,#t2 do
+                        t1[#t1+1] = t2[i]
+                    end
+                    return t1
+                end
+                custom_item_table = join_tables(items_place_at_top, custom_item_table)
             end
         end
         self.db_conn:close()
@@ -332,56 +350,41 @@ function CoverMenu:setupLayout()
     self.show_parent = self.show_parent or self
     self.title_bar = TitleBar:new {
         show_parent = self.show_parent,
-        fullscreen = "true",
-        align = "center",
         title = "",
-        title_top_padding = Screen:scaleBySize(6),
         subtitle = "",
-        subtitle_truncate_left = true,
-        subtitle_fullwidth = true,
-        button_padding = Screen:scaleBySize(5),
         -- home
-        left_icon = "home",
-        left_icon_size_ratio = 1,
-        left_icon_tap_callback = function() self:goHome() end,
-        -- next: left_icon_tap_callback = function() self:onHome() end,
-        left_icon_hold_callback = function() self:onShowFolderMenu() end,
+        left1_icon = "home",
+        left1_icon_tap_callback = function() self:onHome() end,
+        left1_icon_hold_callback = function() self:onShowFolderMenu() end,
         -- favorites
         left2_icon = "favorites",
-        left2_icon_size_ratio = 1,
         left2_icon_tap_callback = function() FileManager.instance.collections:onShowColl() end,
         left2_icon_hold_callback = function() FileManager.instance.folder_shortcuts:onShowFolderShortcutsDialog() end,
         -- history
         left3_icon = "history",
-        left3_icon_size_ratio = 1,
         left3_icon_tap_callback = function() FileManager.instance.history:onShowHist() end,
         left3_icon_hold_callback = false,
-        -- plus menu
-        right_icon = self.selected_files and "check" or "plus",
-        right_icon_size_ratio = 1,
-        right_icon_tap_callback = function() self:onShowPlusMenu() end,
-        right_icon_hold_callback = false,
-        -- up folder
-        right2_icon = "go_up",
-        right2_icon_size_ratio = 1,
-        right2_icon_tap_callback = function() onFolderUp() end,
-        right2_icon_hold_callback = false,
-        -- open last file
-        right3_icon = "last_document",
-        right3_icon_size_ratio = 1,
-        right3_icon_tap_callback = function() FileManager.instance.menu:onOpenLastDoc() end,
-        right3_icon_hold_callback = false,
         -- centered logo
         center_icon = "hero",
-        center_icon_size_ratio = 1.25, -- larger "hero" size compared to rest of titlebar icons
         center_icon_tap_callback = false,
         center_icon_hold_callback = function()
             if G_reader_settings:readSetting("home_dir") ~= nil then
                 meta_browse_mode = not meta_browse_mode
-                self:goHome()
-                -- next: self:onHome()
+                self:onHome()
             end
         end,
+        -- open last file
+        right3_icon = "last_document",
+        right3_icon_tap_callback = function() FileManager.instance.menu:onOpenLastDoc() end,
+        right3_icon_hold_callback = false,
+        -- up folder
+        right2_icon = "go_up",
+        right2_icon_tap_callback = function() onFolderUp() end,
+        right2_icon_hold_callback = false,
+        -- plus menu
+        right1_icon = self.selected_files and "check" or "plus",
+        right1_icon_tap_callback = function() self:onShowPlusMenu() end,
+        right1_icon_hold_callback = false,
     }
 
     local file_chooser = FileChooser:new {
@@ -413,7 +416,7 @@ function CoverMenu:setupLayout()
         if file_manager.selected_files then -- toggle selection
             item.dim = not item.dim and true or nil
             file_manager.selected_files[item.path] = item.dim
-            self:updateItems() -- next: (1, true)
+            self:updateItems(1, true)
         else
             file_manager:openFile(item.path)
         end
@@ -463,7 +466,7 @@ function CoverMenu:setupLayout()
                         if is_file then
                             file_manager.selected_files[file] = true
                             item.dim = true
-                            self:updateItems() -- next: (1, true)
+                            self:updateItems(1, true)
                         end
                     end,
                 },
@@ -709,7 +712,7 @@ function CoverMenu:menuInit()
             w = self.inner_dimen.w,
             h = self.inner_dimen.h - self.page_info:getSize().h,
         },
-        ptutil.darkLine(self.inner_dimen.w),
+        ptutil.mediumBlackLine(self.inner_dimen.w),
     }
     local footer = OverlapGroup:new {
         -- This unique allow_mirroring=false looks like it's enough
@@ -747,14 +750,14 @@ function CoverMenu:updatePageInfo(select_number)
     -- slim down text inside page controls
     local curpagetxt = ""
     if self.page_info_text.text and self.page_info_text.text ~= "" then
-        curpagetxt = string.match(self.page_info_text.text, "(%d+%s%w+%s%d+)") or ""
+        curpagetxt = string.match(self.page_info_text.text, "(%d+%D+%d+)") or ""
     end
     self.page_info_text:setText(curpagetxt)
 
     if not is_pathchooser and self.cur_folder_text and type(self.path) == "string" and self.path ~= '' then
         self.cur_folder_text:setMaxWidth(self.screen_w * 0.94 - self.page_info:getSize().w)
         if BookInfoManager:getSetting("replace_footer_text") then
-            local config = {
+            local config = self.footer_config or {
                 order = {
                     "clock",
                     "wifi",
@@ -826,7 +829,7 @@ function CoverMenu:updatePageInfo(select_number)
                 local text = genItemText[item]()
                 if text then table.insert(device_statuses, text) end
             end
-            if #device_statuses > 0 then alt_footer = table.concat(device_statuses, " · ") end
+            if #device_statuses > 0 then alt_footer = table.concat(device_statuses, ptutil.separator.dot) end
             if self._manager and type(self._manager.name) == "string" then
                 self.cur_folder_text:setText("")
             else

@@ -162,7 +162,7 @@ function BookInfoManager:getDbSize()
     if res then
         num_books = string.match(tostring(res[1][1]), "^(%d+)")
     end
-    return friendly_file_size .. "  —  " .. num_books .. " " .. _("Books")
+    return friendly_file_size .. " (" .. num_books .. " " .. _("Books") .. ")"
 end
 
 function BookInfoManager:createDB()
@@ -176,36 +176,40 @@ function BookInfoManager:createDB()
     -- Less error cases to check if we do it that way
     -- Create it (noop if already there)
     db_conn:exec(BOOKINFO_DB_SCHEMA)
-    -- Check version
-    local db_version = tonumber(db_conn:rowexec("PRAGMA user_version;"))
-    if db_version < BOOKINFO_DB_VERSION then
-        logger.warn(ptdbg.logprefix, "BookInfo cache DB schema updated from version", db_version, "to version", BOOKINFO_DB_VERSION)
-        logger.warn(ptdbg.logprefix, "Deleting existing", self.db_location, "to recreate it")
+    db_conn:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
 
-        -- We'll try to preserve settings, though
-        self:loadSettings(db_conn)
+    -- destroying the entire db is way too expensive, we will never do this
+    -- look into using ALTER statements to modify the tables in-place
+    -- local db_version = tonumber(db_conn:rowexec("PRAGMA user_version;"))
+    -- if db_version < BOOKINFO_DB_VERSION then
+    --     logger.warn(ptdbg.logprefix, "BookInfo cache DB schema updated from version", db_version, "to version", BOOKINFO_DB_VERSION)
+    --     logger.warn(ptdbg.logprefix, "Deleting existing", self.db_location, "to recreate it")
 
-        db_conn:close()
-        os.remove(self.db_location)
+    --     -- We'll try to preserve settings, though
+    --     self:loadSettings(db_conn)
 
-        -- Re-create it
-        db_conn = SQ3.open(self.db_location)
-        db_conn:exec(BOOKINFO_DB_SCHEMA)
+    --     db_conn:close()
+    --     os.remove(self.db_location)
 
-        -- Restore non-deprecated settings
-        for k, v in pairs(self.settings) do
-            if k ~= "version" then
-                self:saveSetting(k, v, db_conn, true)
-            end
-        end
-        self:loadSettings(db_conn)
+    --     -- Re-create it
+    --     db_conn = SQ3.open(self.db_location)
+    --     db_conn:exec(BOOKINFO_DB_SCHEMA)
 
-        -- Update version
-        db_conn:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
+    --     -- Restore non-deprecated settings
+    --     for k, v in pairs(self.settings) do
+    --         if k ~= "version" then
+    --             self:saveSetting(k, v, db_conn, true)
+    --         end
+    --     end
+    --     self:loadSettings(db_conn)
 
-        -- Say hi!
-        UIManager:show(InfoMessage:new { text = _("Book info cache database updated."), timeout = 3 })
-    end
+    --     -- Update version
+    --     db_conn:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
+
+    --     -- Say hi!
+    --     UIManager:show(InfoMessage:new { text = _("Book info cache database updated."), timeout = 3 })
+    -- end
+
     db_conn:close()
     self.db_created = true
 end
@@ -541,12 +545,13 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                     local opf_file = nil
                     local locate_opf_command = "unzip " .. "-lqq \"" .. fname .. "\" \"*.opf\""
                     local opf_match_pattern = "(%S+%.opf)$"
+                    local line = ""
 
                     if Device:isAndroid() then
                         -- fh style for Android
                         local fh = io.popen(locate_opf_command, "r")
                         while true and fh ~= nil do
-                            local line = fh:read()
+                            line = fh:read()
                             if line == nil or opf_file ~= nil then
                                 break
                             end
@@ -558,7 +563,7 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                         local std_out = nil
                         std_out = io.popen("unzip " .. "-lqq \"" .. fname .. "\" \"*.opf\"")
                         if std_out then
-                            local line = std_out:read()
+                            line = std_out:read()
                             opf_file = string.match(line, opf_match_pattern)
                             logger.dbg(ptdbg.logprefix, line)
                             std_out:close()
@@ -586,7 +591,10 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                             else
                                 fp = string.match(l, "#pages")
                                 -- check for single line format
-                                fv = string.match(l, "&quot;#value#&quot;: (%d+),")
+                                -- only look for a numerical value if #pages is found
+                                if fp then
+                                    fv = string.match(l, "&quot;#value#&quot;: (%d+),")
+                                end
                                 if fv then
                                     return fp, fv, true
                                 end
@@ -598,7 +606,7 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                             -- fh style for Android
                             local fh = io.popen(expand_opf_command, "r")
                             while true and fh ~= nil do
-                                local line = fh:read()
+                                line = fh:read()
                                 if line == nil then
                                     break
                                 end
@@ -609,8 +617,8 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                             -- std_out style for POSIX
                             local std_out = io.popen(expand_opf_command)
                             if std_out then
-                                for line in std_out:lines() do
-                                    found_pages, found_value, do_break = parse_opf_file(found_pages, found_value, line)
+                                for std_line in std_out:lines() do
+                                    found_pages, found_value, do_break = parse_opf_file(found_pages, found_value, std_line)
                                     if do_break then break end
                                 end
                                 std_out:close()
@@ -881,14 +889,18 @@ end
 local function findFilesInDir(path, recursive)
     local dirs = { path }
     local files = {}
+    local new_dirs = {}
+    local fullpath
+    local attributes
+
     while #dirs ~= 0 do
-        local new_dirs = {}
+        new_dirs = {}
         -- handle each dir
         for __, d in pairs(dirs) do
             -- handle files in d
             for f in lfs.dir(d) do
-                local fullpath = d .. "/" .. f
-                local attributes = lfs.attributes(fullpath)
+                fullpath = d .. "/" .. f
+                attributes = lfs.attributes(fullpath)
                 -- Don't traverse hidden folders if we're not showing them
                 if recursive and attributes.mode == "directory" and f ~= "." and f ~= ".." and (G_reader_settings:isTrue("show_hidden") or not util.stringStartsWith(f, ".")) then
                     table.insert(new_dirs, fullpath)
@@ -986,12 +998,14 @@ Do you want to prune the cache of removed books?]]
     end
 
     local files
+    local filepaths
+
     while true do
         info = InfoMessage:new { text = _("Looking for books to index…") }
         if not automatic_mode then UIManager:show(info) end
         UIManager:forceRePaint()
         completed, files = Trapper:dismissableRunInSubprocess(function()
-            local filepaths = findFilesInDir(path, recursive)
+            filepaths = findFilesInDir(path, recursive)
             table.sort(filepaths)
             return filepaths
         end, info)
@@ -1017,6 +1031,9 @@ Do you want to prune the cache of removed books?]]
         FFIUtil.sleep(2) -- Let the user see that
     else
         local all_files = files
+        local bookinfo
+        local to_extract
+
         while true do
             info = InfoMessage:new { text = T(_("Found %1 books.\nLooking for new books…"), #all_files) }
             UIManager:show(info)
@@ -1025,8 +1042,8 @@ Do you want to prune the cache of removed books?]]
             completed, files = Trapper:dismissableRunInSubprocess(function()
                 files = {}
                 for _, filepath in pairs(all_files) do
-                    local bookinfo = self:getBookInfo(filepath)
-                    local to_extract = not bookinfo
+                    bookinfo = self:getBookInfo(filepath)
+                    to_extract = not bookinfo
                     if bookinfo and cover_specs and not bookinfo.ignore_cover then
                         if bookinfo.cover_fetched then
                             --if bookinfo.has_cover and BookInfoManager.isCachedCoverInvalid(bookinfo, cover_specs) then
@@ -1075,9 +1092,13 @@ Do you want to prune the cache of removed books?]]
     local info_max_seen_height = 0
     local success
 
+    local filepath
+    local filename
+    local d
+
     while i <= nb_files do
-        local filepath = files[i]
-        local filename = FFIUtil.basename(filepath)
+        filepath = files[i]
+        filename = FFIUtil.basename(filepath)
 
         local orig_moved_offset = info.movable:getMovedOffset()
         info:free()
@@ -1098,7 +1119,7 @@ Do you want to prune the cache of removed books?]]
         info.movable[1][1]._size = nil -- reset HorizontalGroup size
         info.movable:setMovedOffset(orig_moved_offset)
         info:paintTo(Screen.bb, 0, 0)
-        local d = info.movable[1].dimen
+        d = info.movable[1].dimen
         Screen.refreshUI(Screen, d.x, d.y, d.w, d.h)
 
         completed, success = Trapper:dismissableRunInSubprocess(function()
@@ -1139,24 +1160,11 @@ function BookInfoManager.getCachedCoverSize(img_w, img_h, max_img_w, max_img_h)
     return max_img_w, max_img_h, scale_factor
 end
 
--- function BookInfoManager.isCachedCoverInvalid(bookinfo, cover_specs)
---     if not bookinfo.cover_w or not bookinfo.cover_h then -- no thumbnail yet
---         return true
---     end
---     local img_w, img_h = bookinfo.cover_sizetag:match("(%d+)x(%d+)") -- original image
---     if not img_w or not img_h then                                   -- old or bad cover_sizetag
---         return true
---     end
---     img_w, img_h = tonumber(img_w), tonumber(img_h)
---     local max_img_w = cover_specs.max_cover_w
---     local max_img_h = cover_specs.max_cover_h
---     if img_w > max_img_w or img_h > max_img_h then                               -- original image bigger than placeholder
---         local new_cover_w, new_cover_h = BookInfoManager.getCachedCoverSize(img_w, img_h, max_img_w, max_img_h)
---         if new_cover_w > bookinfo.cover_w or new_cover_h > bookinfo.cover_h then -- bigger thumbnail needed
---             return true
---         end
---     end
--- end
+function BookInfoManager.isCachedCoverInvalid(bookinfo, cover_specs)
+    if not bookinfo.cover_w or not bookinfo.cover_h then -- no thumbnail yet
+        return true
+    end
+end
 
 BookInfoManager:init()
 

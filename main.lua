@@ -8,54 +8,42 @@
     https://github.com/joshuacant/ProjectTitle/wiki/Installation
 --]]
 
-local DataStorage = require("datastorage")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local UIManager = require("ui/uimanager")
+local InfoMessage = require("ui/widget/infomessage")
 local logger = require("logger")
 local Version = require("version")
+local _ = require("l10n.gettext")
+local T = require("ffi/util").template
 local ptutil = require("ptutil")
 local util = require("util")
 local ptdbg = require("ptdbg")
 
-local data_dir = DataStorage:getDataDir()
+local data_dir = ptutil.koreader_dir
 logger.info(ptdbg.logprefix, "Checking requirements in '" .. data_dir .. "'")
 
--- Disable this entire plugin if: fonts missing
-local font1_missing = true
-if util.fileExists(data_dir .. "/fonts/source/SourceSans3-Regular.ttf") then
-    font1_missing = false
-else
-    logger.warn(ptdbg.logprefix, "Font1 missing")
-end
-local font2_missing = true
-if util.fileExists(data_dir .. "/fonts/source/SourceSerif4-Regular.ttf") then
-    font2_missing = false
-else
-    logger.warn(ptdbg.logprefix, "Font2 missing")
-end
-local font3_missing = true
-if util.fileExists(data_dir .. "/fonts/source/SourceSerif4-BoldIt.ttf") then
-    font3_missing = false
-else
-    logger.warn(ptdbg.logprefix, "Font3 missing")
-end
-
--- Disable this entire plugin if: icons missing
-local icons_missing = true
-if util.fileExists(data_dir .. "/icons/hero.svg") then
-    icons_missing = false -- check for one icon and assume the rest are there too
-else
-    logger.warn(ptdbg.logprefix, "Icons missing")
-end
-
--- Disable this entire plugin if: Cover Browser is enabled
+-- Disable this plugin entirely if Cover Browser is enabled
 local plugins_disabled = G_reader_settings:readSetting("plugins_disabled")
 if type(plugins_disabled) ~= "table" then
     plugins_disabled = {}
 end
-local coverbrowser_plugin = true
-if plugins_disabled["coverbrowser"] == true then
-    coverbrowser_plugin = false
-else
+if plugins_disabled["coverbrowser"] == nil or plugins_disabled["coverbrowser"] == false then
     logger.warn(ptdbg.logprefix, "CoverBrowser enabled")
+    return { disabled = true }
+end
+
+local fonts_missing = true
+if ptutil.installFonts() then
+    fonts_missing = false
+else
+    logger.warn(ptdbg.logprefix, "Fonts missing")
+end
+
+local icons_missing = true
+if ptutil.installIcons() then
+    icons_missing = false
+else
+    logger.warn(ptdbg.logprefix, "Icons missing")
 end
 --[[
     Directly editing this file to disable the version check is no longer required,
@@ -63,41 +51,59 @@ end
 
     https://github.com/joshuacant/ProjectTitle/wiki/Use-With-Nightly-KOReader-Builds
 --]]
-local safe_version = 202504000000
-local cv_int, cv_hash = Version:getNormalizedCurrentVersion()
+local safe_version = 202510000000
+local cv_int, cv_commit = Version:getNormalizedCurrentVersion()
 local version_unsafe = true
 if (cv_int == safe_version or util.fileExists(data_dir .. "/settings/pt-skipversioncheck.txt")) then
     version_unsafe = false
 else
-    logger.warn(ptdbg.logprefix, "Version not safe ", tostring(cv_int))
-    if cv_int - safe_version < 1000 then
+    logger.warn(ptdbg.logprefix, "Version not safe", tostring(cv_int))
+    if safe_version - cv_int < 1000 then
         logger.warn(ptdbg.logprefix, "This is a KOReader nightly build, not the official release")
     end
 end
 
-if font1_missing or font2_missing or font3_missing or icons_missing or coverbrowser_plugin or version_unsafe then
-    logger.warn(ptdbg.logprefix, "Refusing to load the plugin")
-    return { disabled = true, }
+-- If any required files are missing, or if KOReader version is wrong, load an empty plugin
+-- and display an error message to the user.
+if fonts_missing or icons_missing or version_unsafe then
+    logger.warn(ptdbg.logprefix, "Refusing to fully load the plugin")
+    local error_message_text = _("An error occurred while registering:") .. "  " ..  _("Project: Title")
+    if fonts_missing then
+        error_message_text = error_message_text .. "\n\n" .. _("Fonts") .." - ".. _("Not available")
+    end
+    if icons_missing then
+        error_message_text = error_message_text .. "\n\n" .. _("Icons") .." - ".. _("Not available")
+    end
+    if version_unsafe then
+        error_message_text = error_message_text .. "\n\n" .. "KOReader " ..
+        T(_("%1 ~Unsupported"):gsub("~",""), T(_("Version: %1"):gsub(": ", "\n"), cv_int))
+    end
+    UIManager:show(InfoMessage:new{
+        text = error_message_text,
+        show_icon = false,
+        alignment = "center",
+        timeout = 30,
+    })
+    local CoverBrowser = WidgetContainer:extend {
+        name = "coverbrowsernil",
+    }
+    return CoverBrowser
 end
-logger.info(ptdbg.logprefix, "All tests passed, loading into KOReader ver", tostring(cv_int))
 
--- carry on...
+-- Load full plugin if all tests pass
+logger.info(ptdbg.logprefix, "All tests passed, loading into KOReader ver", tostring(cv_int))
 local BookStatusWidget = require("ui/widget/bookstatuswidget")
 local AltBookStatusWidget = require("altbookstatuswidget")
+local BookInfoManager = require("bookinfomanager")
 local FileChooser = require("ui/widget/filechooser")
 local FileManager = require("apps/filemanager/filemanager")
 local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
 local FileManagerCollection = require("apps/filemanager/filemanagercollection")
 local FileManagerFileSearcher = require("apps/filemanager/filemanagerfilesearcher")
-local FFIUtil = require("ffi/util")
-local Dispatcher = require("dispatcher")
 local Menu = require("ui/widget/menu")
+local Dispatcher = require("dispatcher")
 local Trapper = require("ui/trapper")
-local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local _ = require("l10n.gettext")
-local T = require("ffi/util").template
-local BookInfoManager = require("bookinfomanager")
+local FFIUtil = require("ffi/util")
 
 -- We need to save the original methods early here as locals.
 -- For some reason, saving them as attributes in init() does not allow
@@ -128,6 +134,7 @@ local DISPLAY_MODES = {
     mosaic_image    = true, -- 3x3 grid covers with images
     list_image_meta = true, -- image with metadata (title/authors)
     list_only_meta  = true, -- metadata with no image
+    list_no_meta    = true, -- filename only
 }
 local display_mode_db_names = {
     filemanager = "filemanager_display_mode",
@@ -144,24 +151,16 @@ local curr_display_modes = {
 local series_mode = nil  -- defaults to not display series
 
 local CoverBrowser = WidgetContainer:extend {
-    name = "coverbrowserclean",
+    name = "coverbrowser",
     modes = {
         { _("Cover List"),    "list_image_meta" },
         { _("Cover Grid"),    "mosaic_image" },
         { _("Details List"),  "list_only_meta" },
-        { _("Filenames List") },
+        { _("Filenames List"),  "list_no_meta" },
+        -- { _("Filenames List") },
     },
 }
 
-local max_items_per_page = 10
-local min_items_per_page = 3
-local default_items_per_page = 7
-local max_cols = 4
-local max_rows = 4
-local min_cols = 2
-local min_rows = 2
-local default_cols = 3
-local default_rows = 3
 
 function CoverBrowser:onDispatcherRegisterActions()
     Dispatcher:registerAction("dec_items_pp", {
@@ -256,6 +255,11 @@ function CoverBrowser:init()
         BookInfoManager:saveSetting("force_focus_indicator", false)
         BookInfoManager:saveSetting("use_stacked_foldercovers", false)
         BookInfoManager:saveSetting("config_version", "4")
+    end
+    if BookInfoManager:getSetting("config_version") == 4 then
+        logger.info(ptdbg.logprefix, "Migrating settings to version 5")
+        BookInfoManager:saveSetting("show_tags", false)
+        BookInfoManager:saveSetting("config_version", "5")
     end
 
     -- restart if needed
@@ -353,157 +357,148 @@ function CoverBrowser:addToMainMenu(menu_items)
         sub_item_table = collection_sub_item_table,
     })
     table.insert(sub_item_table, {
+        text = _("Items per page"),
+        sub_item_table = {
+            {
+                text_func = function()
+                    return _("Portrait cover grid mode") .. T(_(": %1 × %2"), fc.nb_cols_portrait, fc.nb_rows_portrait)
+                end,
+                -- Best to not "keep_menu_open = true", to see how this apply on the full view
+                callback = function()
+                    local nb_cols = fc.nb_cols_portrait
+                    local nb_rows = fc.nb_rows_portrait
+                    local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
+                    local widget = DoubleSpinWidget:new {
+                        title_text = _("Portrait cover grid mode"),
+                        width_factor = 0.6,
+                        left_text = _("Columns"),
+                        left_value = nb_cols,
+                        left_min = ptutil.grid_defaults.min_cols,
+                        left_max = ptutil.grid_defaults.max_cols,
+                        left_default = ptutil.grid_defaults.default_cols,
+                        left_precision = "%01d",
+                        right_text = _("Rows"),
+                        right_value = nb_rows,
+                        right_min = ptutil.grid_defaults.min_rows,
+                        right_max = ptutil.grid_defaults.max_rows,
+                        right_default = ptutil.grid_defaults.default_rows,
+                        right_precision = "%01d",
+                        keep_shown_on_apply = true,
+                        callback = function(left_value, right_value)
+                            fc.nb_cols_portrait = left_value
+                            fc.nb_rows_portrait = right_value
+                            if fc.display_mode_type == "mosaic" and fc.portrait_mode then
+                                fc.no_refresh_covers = true
+                                fc:updateItems()
+                            end
+                        end,
+                        close_callback = function()
+                            if fc.nb_cols_portrait ~= nb_cols or fc.nb_rows_portrait ~= nb_rows then
+                                BookInfoManager:saveSetting("nb_cols_portrait", fc.nb_cols_portrait)
+                                BookInfoManager:saveSetting("nb_rows_portrait", fc.nb_rows_portrait)
+                                FileChooser.nb_cols_portrait = fc.nb_cols_portrait
+                                FileChooser.nb_rows_portrait = fc.nb_rows_portrait
+                                if fc.display_mode_type == "mosaic" and fc.portrait_mode then
+                                    fc.no_refresh_covers = nil
+                                    fc:updateItems()
+                                end
+                            end
+                        end,
+                    }
+                    UIManager:show(widget)
+                end,
+            },
+            {
+                text_func = function()
+                    return _("Landscape cover grid mode") .. T(_(": %1 × %2"), fc.nb_cols_landscape, fc.nb_rows_landscape)
+                end,
+                callback = function()
+                    local nb_cols = fc.nb_cols_landscape
+                    local nb_rows = fc.nb_rows_landscape
+                    local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
+                    local widget = DoubleSpinWidget:new {
+                        title_text = _("Landscape cover grid mode"),
+                        width_factor = 0.6,
+                        left_text = _("Columns"),
+                        left_value = nb_cols,
+                        left_min = ptutil.grid_defaults.min_cols,
+                        left_max = ptutil.grid_defaults.max_cols,
+                        left_default = ptutil.grid_defaults.default_cols,
+                        left_precision = "%01d",
+                        right_text = _("Rows"),
+                        right_value = nb_rows,
+                        right_min = ptutil.grid_defaults.min_rows,
+                        right_max = ptutil.grid_defaults.max_rows,
+                        right_default = ptutil.grid_defaults.default_rows,
+                        right_precision = "%01d",
+                        keep_shown_on_apply = true,
+                        callback = function(left_value, right_value)
+                            fc.nb_cols_landscape = left_value
+                            fc.nb_rows_landscape = right_value
+                            if fc.display_mode_type == "mosaic" and not fc.portrait_mode then
+                                fc.no_refresh_covers = true
+                                fc:updateItems()
+                            end
+                        end,
+                        close_callback = function()
+                            if fc.nb_cols_landscape ~= nb_cols or fc.nb_rows_landscape ~= nb_rows then
+                                BookInfoManager:saveSetting("nb_cols_landscape", fc.nb_cols_landscape)
+                                BookInfoManager:saveSetting("nb_rows_landscape", fc.nb_rows_landscape)
+                                FileChooser.nb_cols_landscape = fc.nb_cols_landscape
+                                FileChooser.nb_rows_landscape = fc.nb_rows_landscape
+                                if fc.display_mode_type == "mosaic" and not fc.portrait_mode then
+                                    fc.no_refresh_covers = nil
+                                    fc:updateItems()
+                                end
+                            end
+                        end,
+                    }
+                    UIManager:show(widget)
+                end,
+            },
+            {
+                text_func = function()
+                    -- default files_per_page should be calculated by ListMenu on the first drawing,
+                    -- use 7 if ListMenu has not been drawn yet
+                    return _("List modes") .. T(_(": %1"),
+                        fc.files_per_page or ptutil.list_defaults.default_items_per_page)
+                end,
+                callback = function()
+                    local files_per_page = fc.files_per_page or ptutil.list_defaults.default_items_per_page
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    local widget = SpinWidget:new {
+                        title_text = _("List modes"),
+                        value = files_per_page,
+                        value_min = ptutil.list_defaults.min_items_per_page,
+                        value_max = ptutil.list_defaults.max_items_per_page,
+                        default_value = ptutil.list_defaults.default_items_per_page,
+                        keep_shown_on_apply = true,
+                        callback = function(spin)
+                            fc.files_per_page = spin.value
+                            if fc.display_mode_type == "list" then
+                                fc.no_refresh_covers = true
+                                fc:updateItems()
+                            end
+                        end,
+                        close_callback = function()
+                            if fc.files_per_page ~= files_per_page then
+                                BookInfoManager:saveSetting("files_per_page", fc.files_per_page)
+                                FileChooser.files_per_page = fc.files_per_page
+                                if fc.display_mode_type == "list" then
+                                    fc.no_refresh_covers = nil
+                                    fc:updateItems()
+                                end
+                            end
+                        end,
+                    }
+                    UIManager:show(widget)
+                end,
+            },
+        },
+    })
+    table.insert(sub_item_table, {
         text = _("Advanced settings"),
         sub_item_table = {
-            -- {
-            --     text = _("Show focus indicator on touchscreen devices"),
-            --     checked_func = function() return BookInfoManager:getSetting("force_focus_indicator") end,
-            --     callback = function()
-            --         BookInfoManager:toggleSetting("force_focus_indicator")
-            --     end,
-            -- },
-            {
-                text = _("Items per page"),
-                sub_item_table = {
-                    {
-                        text_func = function()
-                            return _("Portrait cover grid mode") .. T(_(": %1 × %2"), fc.nb_cols_portrait,
-                                fc.nb_rows_portrait)
-                        end,
-                        -- Best to not "keep_menu_open = true", to see how this apply on the full view
-                        callback = function()
-                            local nb_cols = fc.nb_cols_portrait
-                            local nb_rows = fc.nb_rows_portrait
-                            local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
-                            local widget = DoubleSpinWidget:new {
-                                title_text = _("Portrait cover grid mode"),
-                                width_factor = 0.6,
-                                left_text = _("Columns"),
-                                left_value = nb_cols,
-                                left_min = min_cols,
-                                left_max = max_cols,
-                                left_default = default_cols,
-                                left_precision = "%01d",
-                                right_text = _("Rows"),
-                                right_value = nb_rows,
-                                right_min = min_rows,
-                                right_max = max_rows,
-                                right_default = default_rows,
-                                right_precision = "%01d",
-                                keep_shown_on_apply = true,
-                                callback = function(left_value, right_value)
-                                    fc.nb_cols_portrait = left_value
-                                    fc.nb_rows_portrait = right_value
-                                    if fc.display_mode_type == "mosaic" and fc.portrait_mode then
-                                        fc.no_refresh_covers = true
-                                        fc:updateItems()
-                                    end
-                                end,
-                                close_callback = function()
-                                    if fc.nb_cols_portrait ~= nb_cols or fc.nb_rows_portrait ~= nb_rows then
-                                        BookInfoManager:saveSetting("nb_cols_portrait", fc.nb_cols_portrait)
-                                        BookInfoManager:saveSetting("nb_rows_portrait", fc.nb_rows_portrait)
-                                        FileChooser.nb_cols_portrait = fc.nb_cols_portrait
-                                        FileChooser.nb_rows_portrait = fc.nb_rows_portrait
-                                        if fc.display_mode_type == "mosaic" and fc.portrait_mode then
-                                            fc.no_refresh_covers = nil
-                                            fc:updateItems()
-                                        end
-                                    end
-                                end,
-                            }
-                            UIManager:show(widget)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            return _("Landscape cover grid mode") .. T(_(": %1 × %2"), fc.nb_cols_landscape,
-                                fc.nb_rows_landscape)
-                        end,
-                        callback = function()
-                            local nb_cols = fc.nb_cols_landscape
-                            local nb_rows = fc.nb_rows_landscape
-                            local DoubleSpinWidget = require("/ui/widget/doublespinwidget")
-                            local widget = DoubleSpinWidget:new {
-                                title_text = _("Landscape cover grid mode"),
-                                width_factor = 0.6,
-                                left_text = _("Columns"),
-                                left_value = nb_cols,
-                                left_min = min_cols,
-                                left_max = max_cols,
-                                left_default = default_cols,
-                                left_precision = "%01d",
-                                right_text = _("Rows"),
-                                right_value = nb_rows,
-                                right_min = min_rows,
-                                right_max = max_rows,
-                                right_default = default_cols,
-                                right_precision = "%01d",
-                                keep_shown_on_apply = true,
-                                callback = function(left_value, right_value)
-                                    fc.nb_cols_landscape = left_value
-                                    fc.nb_rows_landscape = right_value
-                                    if fc.display_mode_type == "mosaic" and not fc.portrait_mode then
-                                        fc.no_refresh_covers = true
-                                        fc:updateItems()
-                                    end
-                                end,
-                                close_callback = function()
-                                    if fc.nb_cols_landscape ~= nb_cols or fc.nb_rows_landscape ~= nb_rows then
-                                        BookInfoManager:saveSetting("nb_cols_landscape", fc.nb_cols_landscape)
-                                        BookInfoManager:saveSetting("nb_rows_landscape", fc.nb_rows_landscape)
-                                        FileChooser.nb_cols_landscape = fc.nb_cols_landscape
-                                        FileChooser.nb_rows_landscape = fc.nb_rows_landscape
-                                        if fc.display_mode_type == "mosaic" and not fc.portrait_mode then
-                                            fc.no_refresh_covers = nil
-                                            fc:updateItems()
-                                        end
-                                    end
-                                end,
-                            }
-                            UIManager:show(widget)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            -- default files_per_page should be calculated by ListMenu on the first drawing,
-                            -- use 7 if ListMenu has not been drawn yet
-                            return _("List modes") .. T(_(": %1"),
-                                fc.files_per_page or default_items_per_page)
-                        end,
-                        callback = function()
-                            local files_per_page = fc.files_per_page or default_items_per_page
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local widget = SpinWidget:new {
-                                title_text = _("List modes"),
-                                value = files_per_page,
-                                value_min = min_items_per_page,
-                                value_max = max_items_per_page,
-                                default_value = default_items_per_page,
-                                keep_shown_on_apply = true,
-                                callback = function(spin)
-                                    fc.files_per_page = spin.value
-                                    if fc.display_mode_type == "list" then
-                                        fc.no_refresh_covers = true
-                                        fc:updateItems()
-                                    end
-                                end,
-                                close_callback = function()
-                                    if fc.files_per_page ~= files_per_page then
-                                        BookInfoManager:saveSetting("files_per_page", fc.files_per_page)
-                                        FileChooser.files_per_page = fc.files_per_page
-                                        if fc.display_mode_type == "list" then
-                                            fc.no_refresh_covers = nil
-                                            fc:updateItems()
-                                        end
-                                    end
-                                end,
-                            }
-                            UIManager:show(widget)
-                        end,
-                    },
-                },
-            },
             {
                 text = _("Folder display"),
                 sub_item_table = {
@@ -518,7 +513,7 @@ function CoverBrowser:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("Show auto-generated cover images as stack instead of grid"),
+                        text = _("Show auto-generated cover images as a stack"),
                         enabled_func = function()
                             return not (BookInfoManager:getSetting("disable_auto_foldercovers"))
                         end,
@@ -602,6 +597,15 @@ function CoverBrowser:addToMainMenu(menu_items)
                                 series_mode = "series_in_separate_line"
                             end
                             BookInfoManager:saveSetting("series_mode", series_mode)
+                            fc:updateItems(1, true)
+                        end,
+                    },
+                    {
+                        text = _("Show calibre tags/keywords"),
+                        separator = true,
+                        checked_func = function() return BookInfoManager:getSetting("show_tags") end,
+                        callback = function()
+                            BookInfoManager:toggleSetting("show_tags")
                             fc:updateItems(1, true)
                         end,
                     },
@@ -717,6 +721,13 @@ function CoverBrowser:addToMainMenu(menu_items)
                     },
                 },
             },
+            {
+                text = _("Show last item indicator on touchscreen devices"),
+                checked_func = function() return BookInfoManager:getSetting("force_focus_indicator") end,
+                callback = function()
+                    BookInfoManager:toggleSetting("force_focus_indicator")
+                end,
+            },
         },
     })
     menu_items.filemanager_display_mode = {
@@ -761,10 +772,10 @@ end
 function CoverBrowser.initGrid(menu, display_mode)
     if menu == nil then return end
     if menu.nb_cols_portrait == nil then
-        menu.nb_cols_portrait  = BookInfoManager:getSetting("nb_cols_portrait") or default_cols
-        menu.nb_rows_portrait  = BookInfoManager:getSetting("nb_rows_portrait") or default_rows
-        menu.nb_cols_landscape = BookInfoManager:getSetting("nb_cols_landscape") or default_cols
-        menu.nb_rows_landscape = BookInfoManager:getSetting("nb_rows_landscape") or default_rows
+        menu.nb_cols_portrait  = BookInfoManager:getSetting("nb_cols_portrait") or ptutil.grid_defaults.default_cols
+        menu.nb_rows_portrait  = BookInfoManager:getSetting("nb_rows_portrait") or ptutil.grid_defaults.default_rows
+        menu.nb_cols_landscape = BookInfoManager:getSetting("nb_cols_landscape") or ptutil.grid_defaults.default_cols
+        menu.nb_rows_landscape = BookInfoManager:getSetting("nb_rows_landscape") or ptutil.grid_defaults.default_rows
         -- initial List mode files_per_page will be calculated and saved by ListMenu on the first drawing
         menu.files_per_page    = BookInfoManager:getSetting("files_per_page")
     end
@@ -913,8 +924,13 @@ function CoverBrowser:setupFileManagerDisplayMode(display_mode)
         FileChooser._recalculateDimen = ListMenu._recalculateDimen
         FileChooser._updateItemsBuildUI = ListMenu._updateItemsBuildUI
         -- Set ListMenu behaviour:
-        FileChooser._do_cover_images = display_mode ~= "list_only_meta"
-        FileChooser._do_filename_only = display_mode == "list_image_filename"
+        if (display_mode == "list_only_meta") or (display_mode == "list_no_meta") then
+            FileChooser._do_cover_images = false
+        else
+            FileChooser._do_cover_images = true
+        end
+        -- booklist_menu._do_cover_images = display_mode ~= "list_only_meta"
+        FileChooser._do_filename_only = display_mode == "list_no_meta"
         FileChooser._do_hint_opened = true -- dogear at bottom
     end
 
@@ -1007,8 +1023,13 @@ function CoverBrowser.getUpdateItemTableFunc(display_mode)
                 booklist_menu._recalculateDimen = ListMenu._recalculateDimen
                 booklist_menu._updateItemsBuildUI = ListMenu._updateItemsBuildUI
                 -- Set ListMenu behaviour:
-                booklist_menu._do_cover_images = display_mode ~= "list_only_meta"
-                booklist_menu._do_filename_only = display_mode == "list_image_filename"
+                if (display_mode == "list_only_meta") or (display_mode == "list_no_meta") then
+                    booklist_menu._do_cover_images = false
+                else
+                    booklist_menu._do_cover_images = true
+                end
+                -- booklist_menu._do_cover_images = display_mode ~= "list_only_meta"
+                booklist_menu._do_filename_only = display_mode == "list_no_meta"
             end
 
             if widget_id == "history" then
@@ -1050,9 +1071,9 @@ function CoverBrowser:onIncreaseItemsPerPage()
     local fc = self.ui.file_chooser
     local display_mode = BookInfoManager:getSetting("filemanager_display_mode")
     -- list modes
-    if display_mode == "list_image_meta" or display_mode == "list_only_meta" then
-        local files_per_page = fc.files_per_page or default_items_per_page
-        files_per_page = math.min(files_per_page + 1, max_items_per_page)
+    if display_mode == "list_image_meta" or display_mode == "list_only_meta" or display_mode == "list_no_meta" then
+        local files_per_page = fc.files_per_page or ptutil.list_defaults.default_items_per_page
+        files_per_page = math.min(files_per_page + 1, ptutil.list_defaults.max_items_per_page)
         BookInfoManager:saveSetting("files_per_page", files_per_page)
         FileChooser.files_per_page = files_per_page
         -- grid mode
@@ -1061,11 +1082,11 @@ function CoverBrowser:onIncreaseItemsPerPage()
         local Screen = Device.screen
         local portrait_mode = Screen:getWidth() <= Screen:getHeight()
         if portrait_mode then
-            local portrait_cols = BookInfoManager:getSetting("nb_cols_portrait") or default_cols
-            local portrait_rows = BookInfoManager:getSetting("nb_rows_portrait") or default_rows
+            local portrait_cols = BookInfoManager:getSetting("nb_cols_portrait") or ptutil.grid_defaults.default_cols
+            local portrait_rows = BookInfoManager:getSetting("nb_rows_portrait") or ptutil.list_defaults.default_rows
             if portrait_cols == portrait_rows then
-                fc.nb_cols_portrait = math.min(portrait_cols + 1, max_cols)
-                fc.nb_rows_portrait = math.min(portrait_rows + 1, max_rows)
+                fc.nb_cols_portrait = math.min(portrait_cols + 1, ptutil.grid_defaults.max_cols)
+                fc.nb_rows_portrait = math.min(portrait_rows + 1, ptutil.grid_defaults.max_rows)
                 BookInfoManager:saveSetting("nb_cols_portrait", fc.nb_cols_portrait)
                 BookInfoManager:saveSetting("nb_rows_portrait", fc.nb_rows_portrait)
                 FileChooser.nb_cols_portrait = fc.nb_cols_portrait
@@ -1073,11 +1094,11 @@ function CoverBrowser:onIncreaseItemsPerPage()
             end
         end
         if not portrait_mode then
-            local landscape_cols = BookInfoManager:getSetting("nb_cols_landscape") or default_cols
-            local landscape_rows = BookInfoManager:getSetting("nb_rows_landscape") or default_rows
+            local landscape_cols = BookInfoManager:getSetting("nb_cols_landscape") or ptutil.grid_defaults.default_cols
+            local landscape_rows = BookInfoManager:getSetting("nb_rows_landscape") or ptutil.list_defaults.default_rows
             if landscape_cols == landscape_rows then
-                fc.nb_cols_landscape = math.min(landscape_cols + 1, max_cols)
-                fc.nb_rows_landscape = math.min(landscape_rows + 1, max_rows)
+                fc.nb_cols_landscape = math.min(landscape_cols + 1, ptutil.grid_defaults.max_cols)
+                fc.nb_rows_landscape = math.min(landscape_rows + 1, ptutil.grid_defaults.max_rows)
                 BookInfoManager:saveSetting("nb_cols_landscape", fc.nb_cols_landscape)
                 BookInfoManager:saveSetting("nb_rows_landscape", fc.nb_rows_landscape)
                 FileChooser.nb_cols_landscape = fc.nb_cols_landscape
@@ -1094,9 +1115,9 @@ function CoverBrowser:onDecreaseItemsPerPage()
     local fc = self.ui.file_chooser
     local display_mode = BookInfoManager:getSetting("filemanager_display_mode")
     -- list modes
-    if display_mode == "list_image_meta" or display_mode == "list_only_meta" then
-        local files_per_page = fc.files_per_page or default_items_per_page
-        files_per_page = math.max(files_per_page - 1, min_items_per_page)
+    if display_mode == "list_image_meta" or display_mode == "list_only_meta" or display_mode == "list_no_meta" then
+        local files_per_page = fc.files_per_page or ptutil.list_defaults.default_items_per_page
+        files_per_page = math.max(files_per_page - 1, ptutil.list_defaults.min_items_per_page)
         BookInfoManager:saveSetting("files_per_page", files_per_page)
         FileChooser.files_per_page = files_per_page
         -- grid mode
@@ -1105,11 +1126,11 @@ function CoverBrowser:onDecreaseItemsPerPage()
         local Screen = Device.screen
         local portrait_mode = Screen:getWidth() <= Screen:getHeight()
         if portrait_mode then
-            local portrait_cols = BookInfoManager:getSetting("nb_cols_portrait") or default_cols
-            local portrait_rows = BookInfoManager:getSetting("nb_rows_portrait") or default_rows
+            local portrait_cols = BookInfoManager:getSetting("nb_cols_portrait") or ptutil.grid_defaults.default_cols
+            local portrait_rows = BookInfoManager:getSetting("nb_rows_portrait") or ptutil.list_defaults.default_rows
             if portrait_cols == portrait_rows then
-                fc.nb_cols_portrait = math.max(portrait_cols - 1, min_cols)
-                fc.nb_rows_portrait = math.max(portrait_rows - 1, min_rows)
+                fc.nb_cols_portrait = math.max(portrait_cols - 1, ptutil.grid_defaults.min_cols)
+                fc.nb_rows_portrait = math.max(portrait_rows - 1, ptutil.grid_defaults.min_rows)
                 BookInfoManager:saveSetting("nb_cols_portrait", fc.nb_cols_portrait)
                 BookInfoManager:saveSetting("nb_rows_portrait", fc.nb_rows_portrait)
                 FileChooser.nb_cols_portrait = fc.nb_cols_portrait
@@ -1117,11 +1138,11 @@ function CoverBrowser:onDecreaseItemsPerPage()
             end
         end
         if not portrait_mode then
-            local landscape_cols = BookInfoManager:getSetting("nb_cols_landscape") or default_cols
-            local landscape_rows = BookInfoManager:getSetting("nb_rows_landscape") or default_rows
+            local landscape_cols = BookInfoManager:getSetting("nb_cols_landscape") or ptutil.grid_defaults.default_cols
+            local landscape_rows = BookInfoManager:getSetting("nb_rows_landscape") or ptutil.list_defaults.default_rows
             if landscape_cols == landscape_rows then
-                fc.nb_cols_landscape = math.max(landscape_cols - 1, min_cols)
-                fc.nb_rows_landscape = math.max(landscape_rows - 1, min_rows)
+                fc.nb_cols_landscape = math.max(landscape_cols - 1, ptutil.grid_defaults.min_cols)
+                fc.nb_rows_landscape = math.max(landscape_rows - 1, ptutil.grid_defaults.min_rows)
                 BookInfoManager:saveSetting("nb_cols_landscape", fc.nb_cols_landscape)
                 BookInfoManager:saveSetting("nb_rows_landscape", fc.nb_rows_landscape)
                 FileChooser.nb_cols_landscape = fc.nb_cols_landscape
