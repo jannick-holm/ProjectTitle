@@ -109,8 +109,6 @@ for i = 1, #BOOKINFO_COLS_SET do
     table.insert(bookinfo_values_sql, "?")
 end
 
-local max_cover_dimen = 600 -- tested 400, 600, and 800
-
 -- Build our most often used SQL queries according to columns
 local BOOKINFO_INSERT_SQL = "INSERT OR REPLACE INTO bookinfo " ..
     "(" .. table.concat(BOOKINFO_COLS_SET, ",") .. ") " ..
@@ -134,6 +132,8 @@ local UNSUPPORTED_REASONS = {
 }
 
 local BookInfoManager = {}
+
+BookInfoManager.max_cover_dimen = 600 -- tested 400, 600, and 800
 
 function BookInfoManager:init()
     self.db_location = DataStorage:getSettingsDir() .. "/PT_bookinfo_cache.sqlite3"
@@ -543,12 +543,15 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                     end
 
                     local opf_file = nil
-                    local locate_opf_command = "unzip " .. "-lqq \"" .. fname .. "\" \"*.opf\""
+                    local locate_opf_command = "unzip " .. "-lqq \"" .. fname
                     local opf_match_pattern = "(%S+%.opf)$"
                     local line = ""
 
+                    -- fh style for Android
                     if Device:isAndroid() then
-                        -- fh style for Android
+                        -- android unzip binary doesn't always have wildcard support
+                        locate_opf_command = locate_opf_command .. "\""
+                        logger.dbg(ptdbg.logprefix, locate_opf_command)
                         local fh = io.popen(locate_opf_command, "r")
                         while true and fh ~= nil do
                             line = fh:read()
@@ -558,10 +561,13 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                             opf_file = string.match(line, opf_match_pattern)
                             logger.dbg(ptdbg.logprefix, line)
                         end
+                    -- std_out style for POSIX
                     else
-                        -- std_out style for POSIX
                         local std_out = nil
-                        std_out = io.popen("unzip " .. "-lqq \"" .. fname .. "\" \"*.opf\"")
+                        -- non-android (kobo, kindle, etc?) unzip seems to have wildcard support
+                        locate_opf_command = locate_opf_command .. "\" \"*.opf\""
+                        logger.dbg(ptdbg.logprefix, locate_opf_command)
+                        std_out = io.popen(locate_opf_command)
                         if std_out then
                             line = std_out:read()
                             opf_file = string.match(line, opf_match_pattern)
@@ -602,8 +608,8 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                             return fp, fv, false
                         end
 
+                        -- fh style for Android
                         if Device:isAndroid() then
-                            -- fh style for Android
                             local fh = io.popen(expand_opf_command, "r")
                             while true and fh ~= nil do
                                 line = fh:read()
@@ -613,8 +619,8 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                                 found_pages, found_value, do_break = parse_opf_file(found_pages, found_value, line)
                                 if do_break then break end
                             end
+                        -- std_out style for POSIX
                         else
-                            -- std_out style for POSIX
                             local std_out = io.popen(expand_opf_command)
                             if std_out then
                                 for std_line in std_out:lines() do
@@ -624,6 +630,7 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
                                 std_out:close()
                             end
                         end
+
                         if found_value and found_value ~= "0" then
                             logger.dbg(ptdbg.logprefix, "Pagecount found in opf metadata ", fname, found_value)
                             return found_value
@@ -650,8 +657,8 @@ function BookInfoManager:extractBookInfo(filepath, cover_specs)
             end
             if cover_specs then
                 -- ignore passed cover_specs, make cover at a fixed maximum and keep it forever
-                local spec_max_cover_w = max_cover_dimen
-                local spec_max_cover_h = max_cover_dimen
+                local spec_max_cover_w = BookInfoManager.max_cover_dimen
+                local spec_max_cover_h = BookInfoManager.max_cover_dimen
                 dbrow.cover_fetched = 'Y' -- we had a try at getting a cover
                 local cover_bb = FileManagerBookInfo:getCoverImage(document)
                 if cover_bb then
@@ -1002,7 +1009,7 @@ Do you want to prune the cache of removed books?]]
 
     while true do
         info = InfoMessage:new { text = _("Looking for books to index…") }
-        if not automatic_mode then UIManager:show(info) end
+        UIManager:show(info)
         UIManager:forceRePaint()
         completed, files = Trapper:dismissableRunInSubprocess(function()
             filepaths = findFilesInDir(path, recursive)
@@ -1015,10 +1022,13 @@ Do you want to prune the cache of removed books?]]
             end
         elseif not files or #files == 0 then
             UIManager:close(info)
-            if not automatic_mode then info = InfoMessage:new { text = _("No books were found.") } end
-            UIManager:show(info)
+            if not automatic_mode then
+                info = InfoMessage:new { text = _("No books were found.") }
+                UIManager:show(info)
+            end
             return
         else
+            UIManager:close(info)
             break
         end
     end

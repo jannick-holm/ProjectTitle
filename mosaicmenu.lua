@@ -502,7 +502,7 @@ function MosaicMenuItem:update()
         if is_pathchooser == false then
             local subfolder_cover_image
             -- check for folder image
-            subfolder_cover_image = ptutil.getFolderCover(self.filepath, dimen.w, dimen.h)
+            subfolder_cover_image = ptutil.getFolderCover(self.filepath, dimen.w, dimen.h, self.entry.pt_cover_path)
             -- check for books with covers in the subfolder
             if subfolder_cover_image == nil and not BookInfoManager:getSetting("disable_auto_foldercovers") then
                 subfolder_cover_image = ptutil.getSubfolderCoverImages(self.filepath, max_img_w, max_img_h)
@@ -762,15 +762,27 @@ function MosaicMenuItem:update()
                 local border_total = Size.border.thin * 2
                 local _, _, scale_factor = BookInfoManager.getCachedCoverSize(bookinfo.cover_w, bookinfo.cover_h,
                     max_img_w - border_total, max_img_h - border_total)
+                local img_width
+                local img_height
+                if ptutil.grid_defaults.stretch_covers then
+                    scale_factor = nil
+                    img_width = (max_img_w * ptutil.grid_defaults.stretch_ratio) - border_total
+                    img_height = max_img_h - border_total
+                else
+                    img_width = math.floor(bookinfo.cover_w * scale_factor)
+                    img_height = math.floor(bookinfo.cover_h * scale_factor)
+                end
                 local image = ImageWidget:new {
                     image = bookinfo.cover_bb,
                     scale_factor = scale_factor,
+                    width = img_width,
+                    height = img_height,
                 }
                 widget = CenterContainer:new {
                     dimen = dimen,
                     FrameContainer:new {
-                        width = math.floor((bookinfo.cover_w * scale_factor) + border_total),
-                        height = math.floor((bookinfo.cover_h * scale_factor) + border_total),
+                        width = img_width + border_total,
+                        height = img_height + border_total,
                         margin = 0,
                         padding = 0,
                         radius = frame_radius,
@@ -946,8 +958,8 @@ function MosaicMenuItem:paintTo(bb, x, y)
                 margin = 0,
                 series_widget_text,
             }
-            local pos_x = x + self.width / 2 + target.width / 2 - series_widget:getSize().w * xmult
-            local pos_y = y + series_widget:getSize().w * 0.33
+            local pos_x = x + (self.width / 2) + (target.width / 2) - (series_widget:getSize().w * xmult)
+            local pos_y = y + (self.height - target.height) / 2 + (series_widget:getSize().h * (1 - xmult))
             series_widget:paintTo(bb, pos_x, pos_y)
         end
 
@@ -958,12 +970,12 @@ function MosaicMenuItem:paintTo(bb, x, y)
             if est_page_count then
                 local fn_pages = tonumber(est_page_count)
                 local max_progress_size = ptutil.grid_defaults.progress_bar_max_size
-                local pixels_per_page = ptutil.grid_defaults.progress_bar_pixels_per_page
+                local pages_per_pixel = ptutil.grid_defaults.progress_bar_pages_per_pixel
                 local min_progress_size = ptutil.grid_defaults.progress_bar_min_size
                 local total_pixels = math.max(
-                (math.min(math.floor((fn_pages / pixels_per_page) + 0.5), max_progress_size)), min_progress_size)
+                (math.min(math.floor((fn_pages / pages_per_pixel) + 0.5), max_progress_size)), min_progress_size)
                 progress_widget_width_mult = total_pixels / max_progress_size
-                if fn_pages > (max_progress_size * pixels_per_page) then large_book = true end
+                if fn_pages > (max_progress_size * pages_per_pixel) then large_book = true end
             end
             local progress_widget_margin = math.floor((corner_mark_size - progress_widget.height) / 4)
             progress_widget.width = self.width * progress_widget_width_mult

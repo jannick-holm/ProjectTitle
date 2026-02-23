@@ -105,16 +105,18 @@ local Dispatcher = require("dispatcher")
 local Trapper = require("ui/trapper")
 local FFIUtil = require("ffi/util")
 
--- We need to save the original methods early here as locals.
--- For some reason, saving them as attributes in init() does not allow
--- us to get back to classic mode
+-- https://github.com/koreader/koreader/commits/master/frontend/ui/widget/filechooser.lua
 local _FileChooser__recalculateDimen_orig = FileChooser._recalculateDimen
 local _FileChooser_updateItems_orig = FileChooser.updateItems
 local _FileChooser_onCloseWidget_orig = FileChooser.onCloseWidget
-local _FileChooser_genItemTable_orig = FileChooser.genItemTable         -- additional
-local _FileManager_setupLayout_orig = FileManager.setupLayout           -- additional
-local _Menu_init_orig = Menu.init                                       -- additional
-local _Menu_updatePageInfo_orig = Menu.updatePageInfo                   -- additional
+local _FileChooser_genItemTable_orig = FileChooser.genItemTable         -- not in Cover Browser
+
+-- https://github.com/koreader/koreader/commits/master/frontend/apps/filemanager/filemanager.lua
+local _FileManager_setupLayout_orig = FileManager.setupLayout           -- not in Cover Browser
+
+-- https://github.com/koreader/koreader/commits/master/frontend/ui/widget/menu.lua
+local _Menu_init_orig = Menu.init                                       -- not in Cover Browser
+local _Menu_updatePageInfo_orig = Menu.updatePageInfo                   -- not in Cover Browser
 
 local _modified_widgets = {
     filemanager  = FileManager,
@@ -160,7 +162,6 @@ local CoverBrowser = WidgetContainer:extend {
         -- { _("Filenames List") },
     },
 }
-
 
 function CoverBrowser:onDispatcherRegisterActions()
     Dispatcher:registerAction("dec_items_pp", {
@@ -279,14 +280,17 @@ function CoverBrowser:init()
         BookStatusWidget.getStatusContent = AltBookStatusWidget.getStatusContent
         BookStatusWidget.genBookInfoGroup = AltBookStatusWidget.genBookInfoGroup
         BookStatusWidget.genSummaryGroup = AltBookStatusWidget.genSummaryGroup
+        BookStatusWidget.genStatisticsGroup = AltBookStatusWidget.genStatisticsGroup
     end
 
     local home_dir = G_reader_settings:readSetting("home_dir")
     if home_dir then logger.info(ptdbg.logprefix, "Home directory is set to: ", home_dir) end
     if home_dir and util.pathExists(home_dir) and BookInfoManager:getSetting("autoscan_on_eject") then
         local cover_specs = { max_cover_w = 1, max_cover_h = 1, }
-        Trapper:wrap(function()
-            BookInfoManager:extractBooksInDirectory(home_dir, cover_specs, true)
+        UIManager:tickAfterNext(function()
+            Trapper:wrap(function()
+                BookInfoManager:extractBooksInDirectory(home_dir, cover_specs, true)
+            end)
         end)
     end
 

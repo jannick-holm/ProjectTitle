@@ -145,8 +145,8 @@ function ListMenuItem:update()
     -- We'll draw some padding around cover images so they don't run up against
     -- other parts of the list item or decorations
     local padding_size = Screen:scaleBySize(4)
-    local max_img_w = dimen.h - 2 * padding_size -- width = height, squared
-    local max_img_h = dimen.h - 2 * padding_size
+    local max_img_w = dimen.h - (2 * padding_size) -- width = height, squared
+    local max_img_h = dimen.h - (2 * padding_size)
     local cover_specs = {
         max_cover_w = max_img_w,
         max_cover_h = max_img_h,
@@ -219,7 +219,7 @@ function ListMenuItem:update()
         if self.do_cover_image and is_pathchooser == false then
             local subfolder_cover_image
             -- check for folder image
-            subfolder_cover_image = ptutil.getFolderCover(self.filepath, max_img_w * 0.82, max_img_h)
+            subfolder_cover_image = ptutil.getFolderCover(self.filepath, max_img_w * 0.82, max_img_h, self.entry.pt_cover_path)
             -- check for books with covers in the subfolder
             if subfolder_cover_image == nil and not BookInfoManager:getSetting("disable_auto_foldercovers") then
                 subfolder_cover_image = ptutil.getSubfolderCoverImages(self.filepath, max_img_w, max_img_h)
@@ -421,10 +421,12 @@ function ListMenuItem:update()
                 self.menu.cover_info_cache = {}
             end
 
-            local finished_text = _("Finished")
-            local abandoned_string = _("On hold")
-            local read_text = _("Reading")
-            local unread_text = _("New")
+            local progress_strings = {
+                finished = _("Finished"),
+                abandoned = _("On hold"),
+                reading = _("Reading"),
+                unread = _("New"),
+            }
             local pages_str = ""
             local pages_left_str = ""
             local percent_str = ""
@@ -457,11 +459,11 @@ function ListMenuItem:update()
 
                 local fn_pages = tonumber(est_page_count)
                 local max_progress_size = ptutil.list_defaults.progress_bar_max_size
-                local pixels_per_page = ptutil.list_defaults.progress_bar_pixels_per_page
+                local pages_per_pixel = ptutil.list_defaults.progress_bar_pages_per_pixel
                 local min_progress_size = ptutil.list_defaults.progress_bar_min_size
                 local progress_bar_height = wright_font_size -- progress bar same height as progress text
                 local total_pixels = math.max(
-                    (math.min(math.floor((fn_pages / pixels_per_page) + 0.5), max_progress_size)), min_progress_size)
+                    (math.min(math.floor((fn_pages / pages_per_pixel) + 0.5), max_progress_size)), min_progress_size)
                 local progress_bar = ProgressWidget:new {
                     width = Screen:scaleBySize(total_pixels),
                     height = Screen:scaleBySize(progress_bar_height),
@@ -479,7 +481,7 @@ function ListMenuItem:update()
                 local bar_and_icons
                 local bar_icon_size = Screen:scaleBySize(progress_bar_height * 1.5333)  -- size for icons used with progress bar
 
-                if fn_pages > (max_progress_size * pixels_per_page) then
+                if fn_pages > (max_progress_size * pages_per_pixel) then
                     progress_width = progress_width + math.floor(bar_icon_size / 2) -- add extra width for max size indicator
                     progress_dimen = Geom:new {
                         x = 0, y = 0,
@@ -507,7 +509,7 @@ function ListMenuItem:update()
                 table.insert(progress_block, bar_and_icons)
 
                 -- books with fn_page_count larger than the max get an indicator at the left edge of the progress bar
-                if fn_pages > (max_progress_size * pixels_per_page) then
+                if fn_pages > (max_progress_size * pages_per_pixel) then
                     local max_widget = ImageWidget:new({
                         file = plugin_dir .. "/resources/large_book.svg",
                         width = bar_icon_size,
@@ -595,28 +597,8 @@ function ListMenuItem:update()
 
             -- show progress text, page text, and/or file info text
             if BookInfoManager:getSetting("hide_file_info") then
-                if status == "complete" then
-                    progress_str = finished_text
-                elseif status == "abandoned" then
-                    progress_str = abandoned_string
-                elseif percent_finished then
-                    progress_str = read_text
-                    if not draw_progressbar then
-                        percent_str = math.floor(100 * percent_finished) .. "%"
-                    end
-                    if pages then
-                        if BookInfoManager:getSetting("show_pages_read_as_progress") then
-                            percent_str = read_text
-                            pages_str = T(_("Page %1 of %2"), Math.round(percent_finished * pages), pages)
-                        end
-                        if BookInfoManager:getSetting("show_pages_left_in_progress") then
-                            percent_str = read_text
-                            pages_left_str = T(_("%1 pages left"), Math.round(pages - percent_finished * pages), pages)
-                        end
-                    end
-                elseif not bookinfo._no_provider then
-                    progress_str = unread_text
-                end
+                progress_str, percent_str, pages_str, pages_left_str = ptutil.formatProgressText(status, bookinfo, pages,
+                    draw_progressbar, percent_finished, progress_strings)
 
                 if BookInfoManager:getSetting("show_pages_read_as_progress") then
                     if pages_str ~= "" then
@@ -765,7 +747,7 @@ function ListMenuItem:update()
                 -- and authors with alternate glyphs for that language.
 
                 -- call this style for items like txt files
-                if bookinfo.unsupported or bookinfo._no_provider or not bookinfo.authors then
+                if bookinfo.unsupported or bookinfo._no_provider then
                     fontname_title = ptutil.good_serif
                     bold_title = true
                 end
@@ -969,23 +951,23 @@ function ListMenuItem:update()
             -- height of that listbox. Log if they do.
             if title_reserved_space + math.max(wmetadata:getSize().h, wright_height) > avail_dimen_h then
                 logger.info(ptdbg.logprefix, "Listbox height exceeded")
-                logger.info(ptdbg.logprefix, "dimen.h ", dimen.h)
-                logger.info(ptdbg.logprefix, "avail_dimen_h ", avail_dimen_h)
-                logger.info(ptdbg.logprefix, "title ", title)
-                logger.info(ptdbg.logprefix, "title_ismultiline ", title_ismultiline)
-                logger.info(ptdbg.logprefix, "wtitle:getSize().h ", wtitle:getSize().h)
-                logger.info(ptdbg.logprefix, "title_reserved_space ", title_reserved_space)
-                logger.info(ptdbg.logprefix, "fontsize_title ", fontsize_title)
-                logger.info(ptdbg.logprefix, "author_series ", author_series)
-                logger.info(ptdbg.logprefix, "wmetadata_iswider ", wmetadata_iswider)
-                logger.info(ptdbg.logprefix, "wmetadata:getSize().h ", wmetadata:getSize().h)
-                logger.info(ptdbg.logprefix, "wmetadata:getSize().w ", wmetadata:getSize().w)
-                logger.info(ptdbg.logprefix, "wmetadata_width ", wmetadata_width)
-                logger.info(ptdbg.logprefix, "wmetadata_reserved_space ", wmetadata_reserved_space)
-                logger.info(ptdbg.logprefix, "fontsize_authors ", fontsize_authors)
-                logger.info(ptdbg.logprefix, "wright_height ", wright_height)
-                logger.info(ptdbg.logprefix, "wright_width ", wright_width)
-                logger.info(ptdbg.logprefix, "wright_vertical_padding ", wright_vertical_padding)
+                logger.dbg(ptdbg.logprefix, "dimen.h ", dimen.h)
+                logger.dbg(ptdbg.logprefix, "avail_dimen_h ", avail_dimen_h)
+                logger.dbg(ptdbg.logprefix, "title ", title)
+                logger.dbg(ptdbg.logprefix, "title_ismultiline ", title_ismultiline)
+                logger.dbg(ptdbg.logprefix, "wtitle:getSize().h ", wtitle:getSize().h)
+                logger.dbg(ptdbg.logprefix, "title_reserved_space ", title_reserved_space)
+                logger.dbg(ptdbg.logprefix, "fontsize_title ", fontsize_title)
+                logger.dbg(ptdbg.logprefix, "author_series ", author_series)
+                logger.dbg(ptdbg.logprefix, "wmetadata_iswider ", wmetadata_iswider)
+                logger.dbg(ptdbg.logprefix, "wmetadata:getSize().h ", wmetadata:getSize().h)
+                logger.dbg(ptdbg.logprefix, "wmetadata:getSize().w ", wmetadata:getSize().w)
+                logger.dbg(ptdbg.logprefix, "wmetadata_width ", wmetadata_width)
+                logger.dbg(ptdbg.logprefix, "wmetadata_reserved_space ", wmetadata_reserved_space)
+                logger.dbg(ptdbg.logprefix, "fontsize_authors ", fontsize_authors)
+                logger.dbg(ptdbg.logprefix, "wright_height ", wright_height)
+                logger.dbg(ptdbg.logprefix, "wright_width ", wright_width)
+                logger.dbg(ptdbg.logprefix, "wright_vertical_padding ", wright_vertical_padding)
             end
 
             -- build the widget which holds wtitle, wauthors, and wright

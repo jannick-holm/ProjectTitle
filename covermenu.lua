@@ -29,7 +29,6 @@ local logger = require("logger")
 local util = require("util")
 local ffiUtil = require("ffi/util")
 local C_ = _.pgettext
-local time = require("ui/time")
 local Screen = Device.screen
 local BookInfoManager = require("bookinfomanager")
 local ptutil  = require("ptutil")
@@ -65,7 +64,7 @@ local nb_drawings_since_last_collectgarbage = 0
 
 local function onFolderUp()
     if current_path then -- file browser or PathChooser
-        if current_path == "favorites" then current_path = previous_path end
+        if not util.directoryExists(current_path) then current_path = previous_path end
         if not (G_reader_settings:isTrue("lock_home_folder") and
                 current_path == G_reader_settings:readSetting("home_dir")) then
             FileManager.instance.file_chooser:changeToPath(string.format("%s/..", current_path), current_path)
@@ -137,7 +136,7 @@ function CoverMenu:updateItems(select_number, no_recalculate_dimen)
     -- use the cover_specs set for FileBrowser, and not those from History.
     -- Hopefully, we get self.path=nil when called from History
     if self.path and is_pathchooser == false then
-        if current_path ~= "favorites" then previous_path = current_path end
+        if current_path ~= nil and util.directoryExists(current_path) then previous_path = current_path end
         current_path = self.path
     end
 
@@ -332,6 +331,7 @@ function CoverMenu:genItemTable(dirs, files, path)
         return custom_item_table
     else
         local item_table = CoverMenu._FileChooser_genItemTable_orig(self, dirs, files, path)
+        if item_table == nil then item_table = {} end
         if #item_table > 0 and is_pathchooser == false then
             if item_table[1].text == "⬆ ../" then table.remove(item_table, 1) end
         end
@@ -425,7 +425,7 @@ function CoverMenu:setupLayout()
 
     function file_chooser:onFileHold(item)
         if file_manager.selected_files then
-            file_manager:tapPlus()
+            file_manager:onShowPlusMenu()
         else
             self:showFileDialog(item)
         end
@@ -541,6 +541,15 @@ function CoverMenu:setupLayout()
                     FileManagerConverter:genConvertButton(file, close_dialog_callback, refresh_callback)
                 })
             end
+            if been_opened then
+                local annotations = doc_settings_or_file:readSetting("annotations")
+                if annotations and #annotations > 0 then
+                    table.insert(buttons, {
+                        file_manager.collections:genExportHighlightsButton({ [file] = true }, close_dialog_callback),
+                        file_manager.collections:genBookmarkBrowserButton({ [file] = true }, close_dialog_callback),
+                    })
+                end
+            end
             table.insert(buttons, {
                 {
                     text = _("Open with…"),
@@ -646,10 +655,10 @@ function CoverMenu:menuInit()
         h = self.page_info:getSize().h,
     }
     local footer_font_face = ptutil.good_serif
-    local footer_font_size = 20
+    local footer_font_size = ptutil.footer_defaults.font_size
     if BookInfoManager:getSetting("replace_footer_text") then
         footer_font_face = ptutil.good_sans
-        footer_font_size = 18
+        footer_font_size = ptutil.footer_defaults.font_size_deviceinfo
     end
     if not BookInfoManager:getSetting("reverse_footer") then
         self.cur_folder_text = TextWidget:new {

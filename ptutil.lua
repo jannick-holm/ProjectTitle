@@ -1,7 +1,6 @@
 local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
-local FileManager = require("apps/filemanager/filemanager")
 local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
@@ -11,6 +10,7 @@ local Size = require("ui/size")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local OverlapGroup = require("ui/widget/overlapgroup")
+local Math = require("optmath")
 local logger = require("logger")
 local Device = require("device")
 local Screen = Device.screen
@@ -20,17 +20,29 @@ local DataStorage = require("datastorage")
 local SQ3 = require("lua-ljsqlite3/init")
 local ffiUtil = require("ffi/util")
 local util = require("util")
+local lfs = require("libs/libkoreader-lfs")
 local _ = require("l10n.gettext")
 local ptdbg = require("ptdbg")
 local BookInfoManager = require("bookinfomanager")
 
+
+--[[
+    The settings and functions in this file are to intended make user patches easier.
+    I strongly recommend writing a user patch rather than editing this file directly.
+    Changes made to this file will be lost when upgrading. User patches are forever.
+
+    For more information and examples visit this wiki article:
+
+    https://github.com/joshuacant/ProjectTitle/wiki/User-Patches-for-Project-Title
+--]]
+
+
 local ptutil = {}
 
--- These values adjust defaults and limits for the List views (Cover List, Details List, Filenames List)
 ptutil.list_defaults = {
     -- Progress bar settings
     progress_bar_max_size = 235,      -- maximum progress bar width in pixels
-    progress_bar_pixels_per_page = 3, -- pixels per page for progress bar calculation
+    progress_bar_pages_per_pixel = 3, -- pixels per page for progress bar calculation
     progress_bar_min_size = 25,       -- minimum progress bar width in pixels
 
     -- Author display settings
@@ -67,7 +79,7 @@ ptutil.list_defaults = {
 ptutil.grid_defaults = {
     -- Progress bar settings
     progress_bar_max_size = ptutil.list_defaults.progress_bar_max_size,               -- maximum progress bar width in pixels
-    progress_bar_pixels_per_page = ptutil.list_defaults.progress_bar_pixels_per_page, -- pixels per page for progress bar calculation
+    progress_bar_pages_per_pixel = ptutil.list_defaults.progress_bar_pages_per_pixel, -- pixels per page for progress bar calculation
     progress_bar_min_size = 40,                                                       -- minimum progress bar width in pixels
 
     -- Font size adjustment step (used when fitting text into available space)
@@ -84,15 +96,33 @@ ptutil.grid_defaults = {
     min_rows = 2,
     default_cols = 3,
     default_rows = 3,
+
+    -- Cover Art display
+    stretch_covers = false,
+    stretch_ratio = 1,
 }
 
-ptutil.title_serif = "source/SourceSerif4-BoldIt.ttf"
+ptutil.footer_defaults = {
+    font_size = 20,
+    font_size_deviceinfo = 18,
+}
+
+ptutil.bookstatus_defaults = {
+    header_font_size = 20,
+    metainfo_font_size = 18,
+    title_font_size = 24,
+    description_font_size = Screen:scaleBySize(18),
+}
+
 ptutil.good_serif = "source/SourceSerif4-Regular.ttf"
 ptutil.good_serif_it = "source/SourceSerif4-It.ttf"
 ptutil.good_serif_bold = "source/SourceSerif4-Bold.ttf"
+ptutil.good_serif_boldit = "source/SourceSerif4-BoldIt.ttf"
 ptutil.good_sans = "source/SourceSans3-Regular.ttf"
-ptutil.good_sans_it = "source/SourceSans4-It.ttf"
-ptutil.good_sans_bold = "source/SourceSans4-Bold.ttf"
+ptutil.good_sans_it = "source/SourceSans3-It.ttf"
+ptutil.good_sans_bold = "source/SourceSans3-Bold.ttf"
+ptutil.good_sans_boldit = "source/SourceSans3-BoldIt.ttf"
+ptutil.title_serif = ptutil.good_serif_boldit
 
 -- a non-standard space is used here because it looks nicer
 ptutil.separator = {
@@ -209,54 +239,38 @@ function ptutil.installIcons()
 end
 
 local function findCover(dir_path)
-    local COVER_CANDIDATES = { "cover", "folder", ".cover", ".folder" }
-    local COVER_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".gif" }
     if not dir_path or dir_path == "" or dir_path == ".." or dir_path:match("%.%.$") then
         return nil
     end
+
     dir_path = dir_path:gsub("[/\\]+$", "")
-    -- Try exact matches with lowercase and uppercase extensions
-    for _, candidate in ipairs(COVER_CANDIDATES) do
-        for _, ext in ipairs(COVER_EXTENSIONS) do
-            local exact_path = dir_path .. "/" .. candidate .. ext
-            local f = io.open(exact_path, "rb")
-            if f then
-                f:close()
-                return exact_path
-            end
-            local upper_path = dir_path .. "/" .. candidate .. ext:upper()
-            if upper_path ~= exact_path then
-                f = io.open(upper_path, "rb")
-                if f then
-                    f:close()
-                    return upper_path
-                end
+    if not util.directoryExists(dir_path) then return nil end
+
+    local fn_lc
+    for fn in lfs.dir(dir_path) do
+        fn_lc = fn:lower()
+        if fn_lc:match('^%.?cover%.') or fn_lc:match('^%.?folder%.') then
+            if fn_lc:match('%.jpe?g$') or fn_lc:match('%.png$') or fn_lc:match('%.webp$') or fn_lc:match('%.gif$') then
+                return dir_path .. "/" .. fn
             end
         end
-    end
-    -- Fallback: scan directory for case-insensitive matches
-    local success, handle = pcall(io.popen, 'ls -1 "' .. dir_path .. '" 2>/dev/null')
-    if success and handle then
-        for file in handle:lines() do
-            if file and file ~= "." and file ~= ".." and file ~= "" then
-                local file_lower = file:lower()
-                for _, candidate in ipairs(COVER_CANDIDATES) do
-                    for _, ext in ipairs(COVER_EXTENSIONS) do
-                        if file_lower == candidate .. ext then
-                            handle:close()
-                            return dir_path .. "/" .. file
-                        end
-                    end
-                end
-            end
-        end
-        handle:close()
     end
     return nil
 end
 
-function ptutil.getFolderCover(filepath, max_img_w, max_img_h)
-    local folder_image_file = findCover(filepath)
+---
+--- Gets a folder cover image widget.
+--- @param filepath string: Path to the folder.
+--- @param max_img_w number: Maximum image width.
+--- @param max_img_h number: Maximum image height.
+--- @param pt_cover_path string|nil: Optional explicit cover path for ProjectTitle (e.g., from virtual folders).
+--- @return table|nil: FrameContainer with image widget, or nil if no cover found.
+function ptutil.getFolderCover(filepath, max_img_w, max_img_h, pt_cover_path)
+    local folder_image_file = pt_cover_path
+
+    if not folder_image_file then
+        folder_image_file = findCover(filepath)
+    end
     if folder_image_file ~= nil then
         local success, folder_image = pcall(function()
             local temp_image = ImageWidget:new { file = folder_image_file, scale_factor = 1 }
@@ -317,7 +331,7 @@ local function query_cover_paths(folder, include_subfolders)
     local db_conn = SQ3.open(DataStorage:getSettingsDir() .. "/PT_bookinfo_cache.sqlite3")
     db_conn:set_busy_timeout(5000)
 
-    if not util.pathExists(folder) then return nil end
+    if not util.directoryExists(folder) then return nil end
 
     local query
     folder = folder:gsub("'", "''")
@@ -548,7 +562,7 @@ function ptutil.showProgressBar(pages)
     local show_progress_bar = false
     local est_page_count = pages or nil
     if BookInfoManager:getSetting("force_max_progressbars") and not BookInfoManager:getSetting("show_pages_read_as_progress") then
-        est_page_count = "700"
+        est_page_count = ptutil.list_defaults.progress_bar_pages_per_pixel * ptutil.list_defaults.progress_bar_max_size
     end
     show_progress_bar = est_page_count ~= nil and
         BookInfoManager:getSetting("hide_file_info") and                    -- "show file info"
@@ -650,6 +664,38 @@ function ptutil.formatTags(keywords, tags_limit)
         formatted_tags = formatted_tags .. "…"
     end
     return formatted_tags
+end
+
+function ptutil.formatProgressText(status, bookinfo, pages, draw_progressbar, percent_finished, progress_strings)
+    local pages_str = ""
+    local pages_left_str = ""
+    local percent_str = ""
+    local progress_str = ""
+
+    if status == "complete" then
+        progress_str = progress_strings.finished
+    elseif status == "abandoned" then
+        progress_str = progress_strings.abandoned
+    elseif percent_finished then
+        progress_str = progress_strings.reading
+        if not draw_progressbar then
+            percent_str = math.floor(100 * percent_finished) .. "%"
+        end
+        if pages then
+            if BookInfoManager:getSetting("show_pages_read_as_progress") then
+                percent_str = progress_strings.reading
+                pages_str = T(_("Page %1 of %2"), Math.round(percent_finished * pages), pages)
+            end
+            if BookInfoManager:getSetting("show_pages_left_in_progress") then
+                percent_str = progress_strings.reading
+                pages_left_str = T(_("%1 pages left"), Math.round(pages - percent_finished * pages), pages)
+            end
+        end
+    elseif not bookinfo._no_provider then
+        progress_str = progress_strings.unread
+    end
+
+    return progress_str, percent_str, pages_str, pages_left_str
 end
 
 return ptutil
